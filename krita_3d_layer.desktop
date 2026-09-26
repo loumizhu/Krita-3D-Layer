@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=krita_3d_layer
+X-Python-2-Compatible=false
+Name=Krita 3D Layer
+Comment=Interactive 3D model viewer and camera layer renderer for Krita (OBJ & STL support)

@@ -1,8 +1,8 @@
-# Krita 3D Layer 🗿🎨
+# Krita 3D Layer 
 
 **Drop 3D references right into your Krita canvas. No setup, no hassle.**
 
-Ever wished you could just plop a 3D model into Krita, spin it around, and paint over it? That's exactly what this plugin does. Load an OBJ or STL, orbit it, tweak the lighting, and stamp it directly onto a paint layer — all without leaving Krita.
+Ever wished you could just plop a 3D model into Krita, spin it around, and paint over it? That's exactly what this plugin does. Load an OBJ/GLB/OBJ, orbit it, tweak the lighting, and stamp it directly onto a paint layer — all without leaving Krita.
 You can quickly have a perspective grid ready to draw.
 It ships with a built-in **Asaro Head** so you can start studying planes and values the second you install it.
 
@@ -13,7 +13,7 @@ It ships with a built-in **Asaro Head** so you can start studying planes and val
 ## 🎬 Video Showcase
 
 <!-- Add your video link or embed below -->
-> 🎥 **Walkthrough video coming right up!**
+> 🎥 **video demo**
 > 
 > *(A quick video showing how fast you can position models, tweak lights, and stamp them to your canvas will be posted here soon.)*
 
@@ -23,16 +23,14 @@ It ships with a built-in **Asaro Head** so you can start studying planes and val
 
 - **3D viewport right inside Krita** — orbit, pan, zoom, adjust FOV, all with your mouse
 - **Interactive Gizmo & Scrub Labels** — click 3D axis gizmo to snap views (X/Y/Z) or drag Y/P/D/F labels to scrub camera angles
-- **Sticky Viewport** — pin viewport to the top of the docker while scrolling parameters
-- **Advanced Perspective Modes** — Standard 3-Point, Fisheye / 5-Point Curvilinear, and Artist 5-Vanishing-Point arc modes
-- **Stamp to canvas** — renders the 3D view at full document resolution onto a Krita layer with transparency
+
+- **Multiple Perspective Modes** — Standard 3-Point, Fisheye / 5-Point Curvilinear, and Artist 5-Vanishing-Point arc modes
 - **Live Sync** — move the camera, the canvas layer updates automatically when you release
 - **Multiple render styles** — Shaded Planes, Wireframe, Shaded + Wireframe, Silhouette Mask, Normal Map
 - **Studio lighting** — dual key + fill lights, draggable light direction sphere, follow-camera mode
 - **OBJ, STL & GLB/glTF support** — load standard 3D meshes and embedded GLB/glTF models
 - **Built-in 3D Primitives** — Asaro Head, primitive boxes, spheres, cylinders, ellipses, and ground grids included
 - **Full Session Persistence & Presets** — automatically preserves viewport size, camera state, and parameters across sessions
-- **Zero dependencies** — runs on Krita's built-in PyQt5. No pip, no DLLs, no GPU required
 - **100% Free & Cross-Platform** — works identically on Windows, Linux, and macOS
 
 ---
@@ -116,7 +114,7 @@ Found a bug? Got an idea? Open an issue or PR — this is a free community plugi
 
 ## 📄 License
 
-Free to use. Made for artists, by artists (with a little help from AI).
+Free to use. Made for artists, by artists (with AI coding).
 
 ---
 

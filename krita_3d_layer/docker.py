@@ -515,6 +515,12 @@ class Krita3DLayerDocker(DockWidget):
         self._autosave_timer.timeout.connect(self._save_session)
         self._autosave_timer.start()
 
+        # Fast debounced save timer (triggers save 400ms after user tweaks any control)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._save_session)
+
         # =============================================================
         # SECTION 1: 3D VIEWPORT
         # =============================================================
@@ -1039,6 +1045,7 @@ class Krita3DLayerDocker(DockWidget):
         self.light_sphere.setToolTip("Drag the light point to adjust key light azimuth and elevation angle in real-time")
         self.light_sphere.light_changed.connect(self._on_sphere_light)
         self.light_sphere.interaction_ended.connect(self._on_interaction_ended)
+        self.light_sphere.interaction_ended.connect(self._save_session)
         sr.addWidget(self.light_sphere)
 
         sc = QVBoxLayout(); sc.setSpacing(1)
@@ -1099,9 +1106,8 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_show_frame_guide.stateChanged.connect(self._on_toggle_frame_guide)
         self.sec_settings.add_widget(self.chk_show_frame_guide)
 
-        # Sticky viewport setting
+        # Sticky viewport setting (state initialized by _restore_session)
         self.chk_sticky_viewport = QCheckBox("Sticky Viewport (Always Visible on Scroll)")
-        self.chk_sticky_viewport.setChecked(True)
         self.chk_sticky_viewport.setToolTip("When enabled, the 3D viewport stays pinned at the top of the docker and is always visible even when you scroll down through the controls")
         self.chk_sticky_viewport.stateChanged.connect(self._on_toggle_sticky_viewport)
         self.sec_settings.add_widget(self.chk_sticky_viewport)
@@ -1152,6 +1158,7 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_transp.setChecked(True)
         self.chk_transp.setToolTip("Render 3D object onto Krita layer with transparent background")
         self.chk_transp.stateChanged.connect(self._live_sync)
+        self.chk_transp.stateChanged.connect(self._schedule_save)
         bg_row.addWidget(self.chk_transp, 1)
 
         self.btn_bg_col = QPushButton("🎨 BG Color")
@@ -1188,6 +1195,7 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_live.setChecked(True)
         self.chk_live.setToolTip("Automatically update the Krita canvas paint layer on every camera adjustment")
         self.chk_live.stateChanged.connect(self._live_sync)
+        self.chk_live.stateChanged.connect(self._schedule_save)
         sync_row.addWidget(self.chk_live, 1)
 
         self.btn_stamp = QPushButton("⚡ Stamp Now")
@@ -1201,16 +1209,18 @@ class Krita3DLayerDocker(DockWidget):
 
         L.addStretch(1)
 
+        # Connect all collapsible section toggles to schedule auto-save
+        for sec in (self.sec_viewport, self.sec_presets, self.sec_model, self.sec_cam,
+                    self.sec_canvas, self.sec_grid, self.sec_light, self.sec_settings):
+            sec.toggled.connect(self._schedule_save)
+
         # Initialize UI sync
         self._sync_ui()
         self._match_ratio()
         self._populate_presets_combo()
 
         # Restore last saved session state (after all widgets are built)
-        try:
-            self._restore_session()
-        except Exception:
-            pass
+        self._restore_session()
 
     # -----------------------------------------------------------------
     # Helper widget builders with tooltips
@@ -1220,6 +1230,8 @@ class Krita3DLayerDocker(DockWidget):
         s.setRange(mn, mx)
         s.setValue(val)
         s.valueChanged.connect(cb)
+        s.valueChanged.connect(self._schedule_save)
+        s.sliderReleased.connect(self._save_session)
         return s
 
     def _dspin(self, mn, mx, val, step, cb):
@@ -1228,6 +1240,7 @@ class Krita3DLayerDocker(DockWidget):
         s.setSingleStep(step)
         s.setValue(val)
         s.valueChanged.connect(cb)
+        s.valueChanged.connect(self._schedule_save)
         return s
 
     def _ispin(self, mn, mx, val, step, cb):
@@ -1236,6 +1249,7 @@ class Krita3DLayerDocker(DockWidget):
         s.setSingleStep(step)
         s.setValue(val)
         s.valueChanged.connect(cb)
+        s.valueChanged.connect(self._schedule_save)
         return s
 
     # -----------------------------------------------------------------
@@ -1269,7 +1283,7 @@ class Krita3DLayerDocker(DockWidget):
         if path:
             self._load_file(path)
 
-    def _load_file(self, path):
+    def _load_file(self, path, frame=True):
         try:
             m = load_3d_file(path)
             self.mesh = m
@@ -1278,12 +1292,16 @@ class Krita3DLayerDocker(DockWidget):
             fn = os.path.basename(path)
             self.lbl_model.setText(f"{fn}\n{len(m.vertices)} verts, {len(m.faces)} faces")
             self.lbl_status.setText(f"Loaded {fn}")
-            self.viewport.frame_object()
-            self._sync_ui()
-            self._live_sync()
+            if frame:
+                self.viewport.frame_object()
+                self._sync_ui()
+                self._live_sync()
+            self._save_session()
         except Exception as e:
             self.lbl_model.setText(f"Load error: {e}")
             self.lbl_status.setText("Failed to load 3D file")
+
+    _load_mesh_file = _load_file
 
     # -----------------------------------------------------------------
     # Color Pickers
@@ -1295,6 +1313,7 @@ class Krita3DLayerDocker(DockWidget):
             self._update_model_color_button()
             self.viewport.update()
             self._live_sync()
+            self._save_session()
 
     def _update_model_color_button(self):
         col = self.viewport.renderer.base_color
@@ -1310,6 +1329,7 @@ class Krita3DLayerDocker(DockWidget):
             self.viewport.renderer.wire_color = c
             self.viewport.update()
             self._live_sync()
+            self._save_session()
 
     def _pick_contour_col(self):
         c = QColorDialog.getColor(self.viewport.renderer.contour_color, self, "Select Contour Outline Color")
@@ -1317,6 +1337,7 @@ class Krita3DLayerDocker(DockWidget):
             self.viewport.renderer.contour_color = c
             self.viewport.update()
             self._live_sync()
+            self._save_session()
 
     def _pick_bg_color(self):
         c = QColorDialog.getColor(self.custom_bg_color, self, "Select Canvas Layer Solid Background Color")
@@ -1325,6 +1346,7 @@ class Krita3DLayerDocker(DockWidget):
             self.btn_bg_col.setStyleSheet(f"background:{c.name()}; color:#000;")
             self.viewport.update()
             self._live_sync()
+            self._save_session()
 
     # -----------------------------------------------------------------
     # Camera Presets & Navigation
@@ -1335,6 +1357,7 @@ class Krita3DLayerDocker(DockWidget):
             self._sync_ui()
             self.viewport.update()
             self._live_sync()
+            self._save_session()
         return handler
 
     def _lens_cb(self, fov):
@@ -1346,6 +1369,7 @@ class Krita3DLayerDocker(DockWidget):
             self.sl_fov.blockSignals(False)
             self.viewport.update()
             self._live_sync()
+            self._save_session()
         return handler
 
     def _reset_camera_all(self):
@@ -1353,24 +1377,28 @@ class Krita3DLayerDocker(DockWidget):
         self._sync_ui()
         self.viewport.update()
         self._live_sync()
+        self._save_session()
 
     def _reset_pitch(self):
         self.viewport.camera.pitch = 0.0
         self._sync_ui()
         self.viewport.update()
         self._live_sync()
+        self._save_session()
 
     def _reset_lens_tilt(self):
         self.viewport.camera.tilt = 0.0
         self._sync_ui()
         self.viewport.update()
         self._live_sync()
+        self._save_session()
 
     def _reset_roll(self):
         self.viewport.camera.roll = 0.0
         self._sync_ui()
         self.viewport.update()
         self._live_sync()
+        self._save_session()
 
     def _reset_pan(self):
         self.viewport.camera.pan_x = 0.0
@@ -1379,6 +1407,7 @@ class Krita3DLayerDocker(DockWidget):
         self.spin_pan_y.blockSignals(True); self.spin_pan_y.setValue(0.0); self.spin_pan_y.blockSignals(False)
         self.viewport.update()
         self._live_sync()
+        self._save_session()
 
     def _frame_view(self):
         self.viewport.frame_object()
@@ -1387,6 +1416,7 @@ class Krita3DLayerDocker(DockWidget):
         self.viewport.update()
         self._live_sync()
         self.lbl_status.setText("Framed object in view")
+        self._save_session()
 
     def _center_on_model(self):
         # Center camera and target directly on model
@@ -1411,6 +1441,7 @@ class Krita3DLayerDocker(DockWidget):
         self.viewport.update()
         self._live_sync()
         self.lbl_status.setText("Model centered in view")
+        self._save_session()
 
     def _center_origin(self):
         self.spin_tx.setValue(0.0)
@@ -1426,6 +1457,7 @@ class Krita3DLayerDocker(DockWidget):
         self.viewport.update()
         self._live_sync()
         self.lbl_status.setText("Target reset to origin")
+        self._save_session()
 
     def _update_proj_controls_visibility(self, text):
         is_fisheye    = (text == ProjectionMode.FISHEYE)
@@ -1765,11 +1797,13 @@ class Krita3DLayerDocker(DockWidget):
         self.viewport.set_render_style(text)
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _on_wire_cull(self, state):
         self.viewport.renderer.wireframe_backface_culling = (state == Qt.Checked)
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _on_wire_w(self, v):
         w = v / 10.0
@@ -1804,6 +1838,7 @@ class Krita3DLayerDocker(DockWidget):
         gs.axis_colors = self.chk_grid_axis.isChecked()
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     # -----------------------------------------------------------------
     # Ground Perspective Calibrator Dialog
@@ -1849,6 +1884,7 @@ class Krita3DLayerDocker(DockWidget):
         self.viewport.update()
         self._live_sync()
         self.lbl_status.setText(f"Ground calibrated: Tilt {c.pitch:.1f}° Yaw {c.yaw:.1f}° Roll {c.roll:.1f}° (Placed on ground)")
+        self._save_session()
 
     # -----------------------------------------------------------------
     # Scene Frame Limits
@@ -1861,6 +1897,7 @@ class Krita3DLayerDocker(DockWidget):
         self._match_ratio()
         self.lbl_status.setText("Camera mode: Full Canvas")
         self._live_sync()
+        self._save_session()
 
     def _draw_frame_action(self):
         sel = CanvasSyncManager.get_active_selection_rect()
@@ -1874,6 +1911,7 @@ class Krita3DLayerDocker(DockWidget):
             self._on_frame_toggle(Qt.Checked)
             self._match_ratio()
             self.lbl_status.setText(f"Frame locked to selection: {fw}×{fh}")
+            self._save_session()
         else:
             try:
                 if Krita:
@@ -1899,7 +1937,9 @@ class Krita3DLayerDocker(DockWidget):
             self.lbl_frame_info.setText("Full Canvas (No limits)")
             self.viewport.set_scene_frame(None, "")
             self._match_ratio()
+        self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _on_frame_spins(self):
         if self.chk_use_frame.isChecked():
@@ -1911,7 +1951,9 @@ class Krita3DLayerDocker(DockWidget):
             )
             self.lbl_frame_info.setText(f"Frame: {self.frame_rect[2]}×{self.frame_rect[3]} at ({self.frame_rect[0]},{self.frame_rect[1]})")
             self.viewport.set_scene_frame(self.frame_rect, f"{self.frame_rect[2]}×{self.frame_rect[3]}")
+            self.viewport.update()
             self._live_sync()
+            self._schedule_save()
 
     # -----------------------------------------------------------------
     # Studio Lighting
@@ -1922,11 +1964,13 @@ class Krita3DLayerDocker(DockWidget):
         self.lbl_light.setText(f"Az:{int(az)} El:{int(el)}")
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _on_follow(self, state):
         self.viewport.lighting.follow_camera = (state == Qt.Checked)
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _reset_light(self):
         self.viewport.lighting.azimuth = 45.0
@@ -1937,6 +1981,7 @@ class Krita3DLayerDocker(DockWidget):
         self.light_sphere.update()
         self.viewport.update()
         self._live_sync()
+        self._save_session()
 
     def _on_amb(self, v):
         self.viewport.lighting.ambient = v / 100.0
@@ -1956,65 +2001,84 @@ class Krita3DLayerDocker(DockWidget):
     def _on_toggle_overlay_buttons(self, state):
         self.viewport.show_overlay_buttons = (state == Qt.Checked)
         self.viewport.update()
+        self._schedule_save()
 
     def _on_toggle_gizmo(self, state):
         self.viewport.show_gizmo = (state == Qt.Checked)
         self.viewport.update()
+        self._schedule_save()
 
     def _on_toggle_frame_guide(self, state):
         self.viewport.show_canvas_frame = (state == Qt.Checked)
         self.viewport.update()
+        self._schedule_save()
 
-    def _on_toggle_sticky_viewport(self, state):
-        """Toggle sticky viewport: pins the viewport above the scroll area."""
-        self.is_sticky_viewport = (state == Qt.Checked)
+    def _apply_sticky_viewport(self, enable):
+        self.is_sticky_viewport = bool(enable)
+        if hasattr(self, 'chk_sticky_viewport'):
+            self.chk_sticky_viewport.blockSignals(True)
+            self.chk_sticky_viewport.setChecked(self.is_sticky_viewport)
+            self.chk_sticky_viewport.blockSignals(False)
         if self.is_sticky_viewport:
             # Move viewport + resize handle from scroll area into sticky container
-            self.sec_viewport.content_layout.removeWidget(self.viewport)
-            self.sec_viewport.content_layout.removeWidget(self.resize_handle)
-            self._sticky_viewport_layout.addWidget(self.viewport)
-            self._sticky_viewport_layout.addWidget(self.resize_handle)
+            if self.viewport.parent() != self._sticky_viewport_widget:
+                self.sec_viewport.content_layout.removeWidget(self.viewport)
+                self.sec_viewport.content_layout.removeWidget(self.resize_handle)
+                self._sticky_viewport_layout.addWidget(self.viewport)
+                self._sticky_viewport_layout.addWidget(self.resize_handle)
             self._sticky_viewport_widget.setVisible(True)
             self.sec_viewport.set_expanded(False)
         else:
             # Move viewport + resize handle back into the collapsible section
-            self._sticky_viewport_layout.removeWidget(self.viewport)
-            self._sticky_viewport_layout.removeWidget(self.resize_handle)
-            self.sec_viewport.content_layout.insertWidget(0, self.viewport)
-            self.sec_viewport.content_layout.insertWidget(1, self.resize_handle)
+            if self.viewport.parent() == self._sticky_viewport_widget:
+                self._sticky_viewport_layout.removeWidget(self.viewport)
+                self._sticky_viewport_layout.removeWidget(self.resize_handle)
+                self.sec_viewport.content_layout.insertWidget(0, self.viewport)
+                self.sec_viewport.content_layout.insertWidget(1, self.resize_handle)
             self._sticky_viewport_widget.setVisible(False)
             self.sec_viewport.set_expanded(True)
 
+    def _on_toggle_sticky_viewport(self, state):
+        """Toggle sticky viewport: pins the viewport above the scroll area."""
+        self._apply_sticky_viewport(state == Qt.Checked)
+        self._save_session()
+
     def _on_toggle_invert_pan(self, state):
         self.viewport.invert_pan = (state == Qt.Checked)
+        self._schedule_save()
 
     def _on_toggle_invert_orbit_x(self, state):
         self.viewport.invert_orbit_x = (state == Qt.Checked)
+        self._schedule_save()
 
     def _on_toggle_invert_orbit_y(self, state):
         self.viewport.invert_orbit_y = (state == Qt.Checked)
+        self._schedule_save()
 
     def _on_grid_opacity(self, v):
         self.viewport.grid_settings.grid_opacity = v / 100.0
         self.lbl_grid_opac.setText(f"Grid Opacity: {v}%")
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _on_horizon_opacity(self, v):
         self.viewport.grid_settings.horizon_opacity = v / 100.0
         self.lbl_horizon_opac.setText(f"Horizon Opacity: {v}%")
         self.viewport.update()
         self._live_sync()
+        self._schedule_save()
 
     def _on_quality_changed(self, idx):
         """Change render quality: affects viewport anti-aliasing only, NOT canvas resolution."""
         qualities = ["Fast", "Balanced", "High"]
         self.viewport.renderer.quality = qualities[idx]
-        # Don't change canvas render scale; quality only controls viewport display
         self.viewport.update()
+        self._schedule_save()
 
     def _on_debounce_changed(self):
         self.debounce_ms = self.spin_debounce.value()
+        self._schedule_save()
 
     # -----------------------------------------------------------------
     # Live Sync & Canvas Stamping
@@ -2140,6 +2204,30 @@ class Krita3DLayerDocker(DockWidget):
         except Exception:
             pass
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        try:
+            self._match_ratio()
+            if hasattr(self, "is_sticky_viewport"):
+                self._apply_sticky_viewport(self.is_sticky_viewport)
+            self.viewport.update()
+        except Exception:
+            pass
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        try:
+            self._save_session()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        try:
+            self._save_session()
+        except Exception:
+            pass
+
     # -----------------------------------------------------------------
     # Viewport resize handle
     # -----------------------------------------------------------------
@@ -2150,169 +2238,188 @@ class Krita3DLayerDocker(DockWidget):
     # -----------------------------------------------------------------
     # Persistent Session Save / Load
     # -----------------------------------------------------------------
+    def _schedule_save(self, *_):
+        if getattr(self, "_restoring_session", False):
+            return
+        if hasattr(self, "_save_timer"):
+            self._save_timer.start(400)
+
     def _collect_session(self):
         """Collect all current docker state into a flat dict for serialization."""
         c = self.viewport.camera
         gs = self.viewport.grid_settings
+        ren = self.viewport.renderer
+        lit = self.viewport.lighting
+
         data = {
             # Viewport
-            "viewport_height":   self.viewport.height(),
-            # Camera
-            "cam_yaw":           c.yaw,
-            "cam_pitch":         c.pitch,
-            "cam_tilt":          c.tilt,
-            "cam_roll":          c.roll,
-            "cam_distance":      c.distance,
-            "cam_fov":           c.fov,
-            "cam_pan_x":         c.pan_x,
-            "cam_pan_y":         c.pan_y,
-            "cam_target_x":      c.target_x,
-            "cam_target_y":      c.target_y,
-            "cam_target_z":      c.target_z,
-            "cam_projection":    c.projection_mode,
-            "cam_fisheye_fov":   c.fisheye_fov,
-            "cam_curvature":     c.curvature,
-            "cam_fish_fov_mult": c.fish_fov_mult,
-            "cam_fisheye_zoom":  c.fisheye_zoom,
-            "cam_lens_type":     getattr(c, "fisheye_lens_type", "Equidistant"),
-            "cam_crop_circle":   getattr(c, "fisheye_crop_circle", False),
-            # Model
-            "mesh_path":         self.mesh_path or "",
-            "render_style":      self.viewport.render_style,
-            "base_color":        self.viewport.renderer.base_color.name(),
-            "wire_width":        self.viewport.renderer.wire_width,
-            "contour_width":     self.viewport.renderer.contour_width,
-            # Lighting
-            "light_az":          self.viewport.lighting.azimuth,
-            "light_el":          self.viewport.lighting.elevation,
-            "light_ambient":     self.viewport.lighting.ambient,
-            "light_diffuse":     self.viewport.lighting.diffuse,
-            "light_follow":      self.viewport.lighting.follow_camera,
-            # Grid
-            "grid_canvas":       gs.enabled,
-            "grid_viewport":     gs.show_in_viewport,
-            "grid_horizon":      gs.horizon_enabled,
-            "grid_ground":       gs.ground_enabled,
-            "grid_ceiling":      gs.ceiling_enabled,
-            "grid_ceil_h":       gs.ceiling_height,
-            "grid_extent":       gs.grid_extent,
-            "grid_tile":         gs.tile_size,
-            "grid_subdiv":       gs.subdivisions,
-            "grid_exceed":       gs.exceed_lines,
-            "grid_verticals":    gs.vertical_lines,
-            "grid_vert_h":       gs.vertical_height,
-            "grid_axis_col":     gs.axis_colors,
-            "grid_opacity":      gs.grid_opacity,
-            "horizon_opacity":   gs.horizon_opacity,
-            # UI / navigation prefs
-            "nav_camera_mode":   self.viewport.camera_mode,
-            "invert_pan":        self.viewport.invert_pan,
-            "invert_orbit_x":    self.viewport.invert_orbit_x,
-            "invert_orbit_y":    self.viewport.invert_orbit_y,
-            "live_sync":         self.chk_live.isChecked() if hasattr(self, "chk_live") else False,
-            "transparent_bg":    self.chk_transp.isChecked() if hasattr(self, "chk_transp") else False,
-            "custom_bg":         self.custom_bg_color.name() if self.custom_bg_color else "#ffffff",
-            "sticky_viewport":   self.is_sticky_viewport,
+            "viewport_height":      self.viewport.height(),
+            "sticky_viewport":      self.is_sticky_viewport,
+            "show_overlay_buttons": bool(self.viewport.show_overlay_buttons),
+            "show_gizmo":           bool(self.viewport.show_gizmo),
+            "show_frame_guide":     bool(self.viewport.show_canvas_frame),
+
+            # Camera Navigation & Transform
+            "nav_camera_mode":      self.viewport.camera_mode,
+            "invert_pan":           bool(self.viewport.invert_pan),
+            "invert_orbit_x":       bool(self.viewport.invert_orbit_x),
+            "invert_orbit_y":       bool(self.viewport.invert_orbit_y),
+            "cam_yaw":              float(c.yaw),
+            "cam_pitch":            float(c.pitch),
+            "cam_tilt":             float(c.tilt),
+            "cam_roll":             float(c.roll),
+            "cam_distance":         float(c.distance),
+            "cam_fov":              float(c.fov),
+            "cam_pan_x":            float(c.pan_x),
+            "cam_pan_y":            float(c.pan_y),
+            "cam_target_x":         float(c.target_x),
+            "cam_target_y":         float(c.target_y),
+            "cam_target_z":         float(c.target_z),
+
+            # Projection & Lens
+            "cam_projection":       c.projection_mode,
+            "cam_curvature":        float(c.curvature),
+            "cam_fisheye_fov":      float(c.fisheye_fov),
+            "cam_fish_fov_mult":    float(c.fish_fov_mult),
+            "cam_fisheye_zoom":     float(c.fisheye_zoom),
+            "cam_lens_type":        getattr(c, "fisheye_lens_type", "Equidistant"),
+            "cam_crop_circle":      bool(getattr(c, "fisheye_crop_circle", False)),
+
+            # Model & Material
+            "mesh_path":            self.mesh_path or "",
+            "render_style":         self.viewport.render_style,
+            "base_color":           ren.base_color.name() if ren.base_color.isValid() else "#ecb613",
+            "wire_cull":            bool(getattr(ren, "wireframe_backface_culling", True)),
+            "wire_width":           float(ren.wire_width),
+            "wire_color":           ren.wire_color.name() if hasattr(ren, "wire_color") and ren.wire_color.isValid() else "#1e293b",
+            "contour_width":        float(ren.contour_width),
+            "contour_color":        ren.contour_color.name() if hasattr(ren, "contour_color") and ren.contour_color.isValid() else "#0f172a",
+
+            # Studio Lighting
+            "light_az":             float(lit.azimuth),
+            "light_el":             float(lit.elevation),
+            "light_ambient":        float(lit.ambient),
+            "light_diffuse":        float(lit.diffuse),
+            "light_follow":         bool(lit.follow_camera),
+
+            # Perspective Grid
+            "grid_canvas":          bool(gs.enabled),
+            "grid_viewport":        bool(gs.show_in_viewport),
+            "grid_horizon":         bool(gs.horizon_enabled),
+            "grid_ground":          bool(gs.ground_enabled),
+            "grid_ceiling":         bool(gs.ceiling_enabled),
+            "grid_ceil_h":          float(gs.ceiling_height),
+            "grid_extent":          int(gs.grid_extent),
+            "grid_tile":            float(gs.tile_size),
+            "grid_subdiv":          int(gs.subdivisions),
+            "grid_exceed":          bool(gs.exceed_lines),
+            "grid_verticals":       bool(gs.vertical_lines),
+            "grid_vert_h":          float(gs.vertical_height),
+            "grid_axis_col":        bool(gs.axis_colors),
+            "grid_opacity":         float(gs.grid_opacity),
+            "horizon_opacity":      float(gs.horizon_opacity),
+
+            # Ground & Canvas Framing
+            "use_frame":            self.chk_use_frame.isChecked() if hasattr(self, "chk_use_frame") else False,
+            "frame_x":              self.spin_fx.value() if hasattr(self, "spin_fx") else 0,
+            "frame_y":              self.spin_fy.value() if hasattr(self, "spin_fy") else 0,
+            "frame_w":              self.spin_fw.value() if hasattr(self, "spin_fw") else 800,
+            "frame_h":              self.spin_fh.value() if hasattr(self, "spin_fh") else 600,
+
+            # Performance & Canvas Sync
+            "quality":              ren.quality if hasattr(ren, "quality") else "Balanced",
+            "debounce_ms":          self.debounce_ms,
+            "live_sync":            self.chk_live.isChecked() if hasattr(self, "chk_live") else True,
+            "transparent_bg":       self.chk_transp.isChecked() if hasattr(self, "chk_transp") else True,
+            "custom_bg":            self.custom_bg_color.name() if (hasattr(self, "custom_bg_color") and self.custom_bg_color) else "#ffffff",
+
             # Section expand states
-            "sec_viewport_exp":  self.sec_viewport.is_expanded(),
-            "sec_model_exp":     self.sec_model.is_expanded() if hasattr(self, "sec_model") else True,
-            "sec_cam_exp":       self.sec_cam.is_expanded() if hasattr(self, "sec_cam") else True,
+            "sec_viewport_exp":     self.sec_viewport.is_expanded() if hasattr(self, "sec_viewport") else False,
+            "sec_presets_exp":      self.sec_presets.is_expanded() if hasattr(self, "sec_presets") else True,
+            "sec_model_exp":        self.sec_model.is_expanded() if hasattr(self, "sec_model") else True,
+            "sec_cam_exp":          self.sec_cam.is_expanded() if hasattr(self, "sec_cam") else True,
+            "sec_canvas_exp":       self.sec_canvas.is_expanded() if hasattr(self, "sec_canvas") else True,
+            "sec_grid_exp":         self.sec_grid.is_expanded() if hasattr(self, "sec_grid") else True,
+            "sec_light_exp":        self.sec_light.is_expanded() if hasattr(self, "sec_light") else False,
+            "sec_settings_exp":     self.sec_settings.is_expanded() if hasattr(self, "sec_settings") else False,
         }
         return data
 
     def _save_session(self):
         """Save current state to disk."""
+        if getattr(self, "_restoring_session", False):
+            return
         try:
             save_session(self._collect_session())
         except Exception:
             pass
 
     def _restore_session(self):
-        """Load and apply previously saved session state."""
+        """Load and apply previously saved session state with complete UI synchronization."""
         data = load_session()
         if not data:
             return
-        try:
-            c  = self.viewport.camera
-            gs = self.viewport.grid_settings
 
-            # Viewport height
-            vh = data.get("viewport_height", 230)
+        self._restoring_session = True
+        try:
+            c   = self.viewport.camera
+            gs  = self.viewport.grid_settings
+            ren = self.viewport.renderer
+            lit = self.viewport.lighting
+
+            # 1. Model loading first (with frame=False so it doesn't overwrite camera)
+            mpath = data.get("mesh_path", "")
+            loaded = False
+            if mpath and os.path.exists(mpath):
+                self._load_file(mpath, frame=False)
+                loaded = True
+            elif mpath:
+                cand = os.path.join(os.path.dirname(__file__), mpath)
+                if os.path.exists(cand):
+                    self._load_file(cand, frame=False)
+                    loaded = True
+                else:
+                    cand2 = os.path.join(os.path.dirname(__file__), "3D-Primitive", os.path.basename(mpath))
+                    if os.path.exists(cand2):
+                        self._load_file(cand2, frame=False)
+                        loaded = True
+            if not loaded and self.mesh is None:
+                default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", "Asaro Head Planes.obj")
+                if os.path.exists(default_asaro):
+                    self._load_file(default_asaro, frame=False)
+
+            # 2. Viewport height & Sticky Viewport
+            vh = data.get("viewport_height", 170)
             if 60 <= vh <= 800:
                 self.viewport.setFixedHeight(vh)
+            is_sticky = bool(data.get("sticky_viewport", True))
+            self._apply_sticky_viewport(is_sticky)
 
-            # Camera
-            c.yaw         = float(data.get("cam_yaw", c.yaw))
-            c.pitch        = float(data.get("cam_pitch", c.pitch))
-            c.tilt         = float(data.get("cam_tilt", c.tilt))
-            c.roll         = float(data.get("cam_roll", c.roll))
-            c.distance     = float(data.get("cam_distance", c.distance))
-            c.fov          = float(data.get("cam_fov", c.fov))
-            c.pan_x        = float(data.get("cam_pan_x", c.pan_x))
-            c.pan_y        = float(data.get("cam_pan_y", c.pan_y))
-            c.target_x     = float(data.get("cam_target_x", c.target_x))
-            c.target_y     = float(data.get("cam_target_y", c.target_y))
-            c.target_z     = float(data.get("cam_target_z", c.target_z))
-            proj            = data.get("cam_projection", ProjectionMode.PERSPECTIVE)
-            if proj in ProjectionMode.ALL:
-                c.projection_mode = proj
-                c.orthographic     = (proj == ProjectionMode.ORTHOGRAPHIC)
-                idx = ProjectionMode.ALL.index(proj)
-                self.combo_proj.blockSignals(True)
-                self.combo_proj.setCurrentIndex(idx)
-                self.combo_proj.blockSignals(False)
-                self._update_proj_controls_visibility(proj)
-            c.fisheye_fov       = float(data.get("cam_fisheye_fov", c.fisheye_fov))
-            c.curvature          = float(data.get("cam_curvature", c.curvature))
-            c.fish_fov_mult      = float(data.get("cam_fish_fov_mult", c.fish_fov_mult))
-            c.fisheye_zoom       = float(data.get("cam_fisheye_zoom", c.fisheye_zoom))
-            c.fisheye_lens_type  = data.get("cam_lens_type", "Equidistant")
-            c.fisheye_crop_circle = bool(data.get("cam_crop_circle", False))
+            # Viewport display toggles
+            ov = bool(data.get("show_overlay_buttons", True))
+            self.viewport.show_overlay_buttons = ov
+            if hasattr(self, "chk_show_overlay"):
+                self.chk_show_overlay.blockSignals(True)
+                self.chk_show_overlay.setChecked(ov)
+                self.chk_show_overlay.blockSignals(False)
 
-            # Render style
-            rs = data.get("render_style", self.viewport.render_style)
-            self.viewport.render_style = rs
-            if hasattr(self, "combo_style"):
-                from .renderer import RenderStyle as _RS
-                styles = [_RS.SHADED, _RS.SHADED_WIREFRAME, _RS.WIREFRAME, _RS.SILHOUETTE, _RS.NORMAL_MAP]
-                if rs in styles:
-                    self.combo_style.blockSignals(True)
-                    self.combo_style.setCurrentIndex(styles.index(rs))
-                    self.combo_style.blockSignals(False)
+            gz = bool(data.get("show_gizmo", True))
+            self.viewport.show_gizmo = gz
+            if hasattr(self, "chk_show_gizmo"):
+                self.chk_show_gizmo.blockSignals(True)
+                self.chk_show_gizmo.setChecked(gz)
+                self.chk_show_gizmo.blockSignals(False)
 
-            # Colors
-            bc = QColor(data.get("base_color", "#e4e7ec"))
-            if bc.isValid():
-                self.viewport.renderer.base_color = bc
-            self.custom_bg_color = QColor(data.get("custom_bg", "#ffffff"))
+            fg = bool(data.get("show_frame_guide", True))
+            self.viewport.show_canvas_frame = fg
+            if hasattr(self, "chk_show_frame_guide"):
+                self.chk_show_frame_guide.blockSignals(True)
+                self.chk_show_frame_guide.setChecked(fg)
+                self.chk_show_frame_guide.blockSignals(False)
 
-            # Lighting
-            self.viewport.lighting.azimuth   = float(data.get("light_az", 45.0))
-            self.viewport.lighting.elevation  = float(data.get("light_el", 40.0))
-            self.viewport.lighting.ambient    = float(data.get("light_ambient", 0.45))
-            self.viewport.lighting.diffuse    = float(data.get("light_diffuse", 0.55))
-            self.viewport.lighting.follow_camera = bool(data.get("light_follow", True))
-
-            # Grid settings
-            gs.enabled        = bool(data.get("grid_canvas", False))
-            gs.show_in_viewport = bool(data.get("grid_viewport", True))
-            gs.horizon_enabled = bool(data.get("grid_horizon", True))
-            gs.ground_enabled  = bool(data.get("grid_ground", True))
-            gs.ceiling_enabled = bool(data.get("grid_ceiling", False))
-            gs.ceiling_height  = float(data.get("grid_ceil_h", 2.5))
-            gs.grid_extent     = int(data.get("grid_extent", 12))
-            gs.tile_size       = float(data.get("grid_tile", 0.5))
-            gs.subdivisions    = int(data.get("grid_subdiv", 1))
-            gs.exceed_lines    = bool(data.get("grid_exceed", True))
-            gs.vertical_lines  = bool(data.get("grid_verticals", True))
-            gs.vertical_height = float(data.get("grid_vert_h", 2.5))
-            gs.axis_colors     = bool(data.get("grid_axis_col", True))
-            gs.grid_opacity    = float(data.get("grid_opacity", 0.85))
-            gs.horizon_opacity = float(data.get("horizon_opacity", 0.95))
-
-            # Navigation
+            # Navigation preferences
             cam_mode = data.get("nav_camera_mode", CAMERA_MODE_ORBIT)
-            self.viewport.camera_mode    = cam_mode
+            self.viewport.camera_mode = cam_mode
             if hasattr(self, "combo_cam_mode"):
                 idx = self.combo_cam_mode.findText(cam_mode)
                 if idx >= 0:
@@ -2320,40 +2427,314 @@ class Krita3DLayerDocker(DockWidget):
                     self.combo_cam_mode.setCurrentIndex(idx)
                     self.combo_cam_mode.blockSignals(False)
 
-            self.viewport.invert_pan     = bool(data.get("invert_pan", True))
-            self.viewport.invert_orbit_x = bool(data.get("invert_orbit_x", True))
-            self.viewport.invert_orbit_y = bool(data.get("invert_orbit_y", False))
-
+            self.viewport.invert_pan = bool(data.get("invert_pan", True))
             if hasattr(self, "chk_invert_pan"):
+                self.chk_invert_pan.blockSignals(True)
                 self.chk_invert_pan.setChecked(self.viewport.invert_pan)
+                self.chk_invert_pan.blockSignals(False)
+
+            self.viewport.invert_orbit_x = bool(data.get("invert_orbit_x", True))
             if hasattr(self, "chk_invert_orbit_x"):
+                self.chk_invert_orbit_x.blockSignals(True)
                 self.chk_invert_orbit_x.setChecked(self.viewport.invert_orbit_x)
+                self.chk_invert_orbit_x.blockSignals(False)
+
+            self.viewport.invert_orbit_y = bool(data.get("invert_orbit_y", False))
             if hasattr(self, "chk_invert_orbit_y"):
+                self.chk_invert_orbit_y.blockSignals(True)
                 self.chk_invert_orbit_y.setChecked(self.viewport.invert_orbit_y)
+                self.chk_invert_orbit_y.blockSignals(False)
 
-            self.is_sticky_viewport = bool(data.get("sticky_viewport", True))
-            if hasattr(self, "chk_sticky_viewport"):
-                self.chk_sticky_viewport.setChecked(self.is_sticky_viewport)
+            # 3. Camera parameters
+            c.yaw         = float(data.get("cam_yaw", c.yaw))
+            c.pitch       = float(data.get("cam_pitch", c.pitch))
+            c.tilt        = float(data.get("cam_tilt", c.tilt))
+            c.roll        = float(data.get("cam_roll", c.roll))
+            c.distance    = float(data.get("cam_distance", c.distance))
+            c.fov         = float(data.get("cam_fov", c.fov))
+            c.pan_x       = float(data.get("cam_pan_x", c.pan_x))
+            c.pan_y       = float(data.get("cam_pan_y", c.pan_y))
+            c.target_x    = float(data.get("cam_target_x", c.target_x))
+            c.target_y    = float(data.get("cam_target_y", c.target_y))
+            c.target_z    = float(data.get("cam_target_z", c.target_z))
 
-            # Section expand states
-            if "sec_viewport_exp" in data and hasattr(self, "sec_viewport"):
-                self.sec_viewport.set_expanded(bool(data["sec_viewport_exp"]))
-            if "sec_model_exp" in data and hasattr(self, "sec_model"):
-                self.sec_model.set_expanded(bool(data["sec_model_exp"]))
-            if "sec_cam_exp" in data and hasattr(self, "sec_cam"):
-                self.sec_cam.set_expanded(bool(data["sec_cam_exp"]))
+            # Projection & Lens
+            proj = data.get("cam_projection", ProjectionMode.PERSPECTIVE)
+            if proj in ProjectionMode.ALL:
+                c.projection_mode = proj
+                c.orthographic = (proj == ProjectionMode.ORTHOGRAPHIC)
+                if hasattr(self, "combo_proj"):
+                    idx = self.combo_proj.findText(proj)
+                    if idx >= 0:
+                        self.combo_proj.blockSignals(True)
+                        self.combo_proj.setCurrentIndex(idx)
+                        self.combo_proj.blockSignals(False)
+                    self._update_proj_controls_visibility(proj)
 
-            # Automatically load default model if none is active
-            if self.mesh is None:
-                mpath = data.get("mesh_path", "")
-                if mpath and os.path.exists(mpath):
-                    self._load_mesh_file(mpath)
+            c.curvature = float(data.get("cam_curvature", c.curvature))
+            if hasattr(self, "sl_curv"):
+                self.sl_curv.blockSignals(True)
+                self.sl_curv.setValue(int(c.curvature * 100))
+                self.sl_curv.blockSignals(False)
+                self.lbl_curv.setText(f"Curvature {int(c.curvature * 100)}%")
+            if hasattr(self, "sl_fish_curv"):
+                self.sl_fish_curv.blockSignals(True)
+                self.sl_fish_curv.setValue(int(c.curvature * 100))
+                self.sl_fish_curv.blockSignals(False)
+                self.lbl_fish_curv.setText(f"Curvature Strength: {int(c.curvature * 100)}%")
+
+            c.fisheye_fov = float(data.get("cam_fisheye_fov", c.fisheye_fov))
+            if hasattr(self, "sl_fish_fov"):
+                self.sl_fish_fov.blockSignals(True)
+                self.sl_fish_fov.setValue(int(c.fisheye_fov))
+                self.sl_fish_fov.blockSignals(False)
+                self.lbl_fish_fov.setText(f"Fisheye FOV: {int(c.fisheye_fov)}°")
+
+            c.fish_fov_mult = float(data.get("cam_fish_fov_mult", c.fish_fov_mult))
+            c.fisheye_zoom = float(data.get("cam_fisheye_zoom", c.fisheye_zoom))
+            if hasattr(self, "sl_fish_zoom"):
+                self.sl_fish_zoom.blockSignals(True)
+                self.sl_fish_zoom.setValue(int(c.fisheye_zoom * 100))
+                self.sl_fish_zoom.blockSignals(False)
+                self.lbl_fish_zoom.setText(f"Lens Zoom: {int(c.fisheye_zoom * 100)}%")
+
+            c.fisheye_lens_type = data.get("cam_lens_type", "Equidistant")
+            if hasattr(self, "combo_fish_lens"):
+                for idx in range(self.combo_fish_lens.count()):
+                    if self.combo_fish_lens.itemText(idx).startswith(c.fisheye_lens_type):
+                        self.combo_fish_lens.blockSignals(True)
+                        self.combo_fish_lens.setCurrentIndex(idx)
+                        self.combo_fish_lens.blockSignals(False)
+                        break
+
+            c.fisheye_crop_circle = bool(data.get("cam_crop_circle", False))
+            if hasattr(self, "chk_fish_circle"):
+                self.chk_fish_circle.blockSignals(True)
+                self.chk_fish_circle.setChecked(c.fisheye_crop_circle)
+                self.chk_fish_circle.blockSignals(False)
+
+            # 4. Model & Material
+            rs = data.get("render_style", self.viewport.render_style)
+            self.viewport.render_style = rs
+            if hasattr(self, "combo_style"):
+                idx = self.combo_style.findText(rs)
+                if idx >= 0:
+                    self.combo_style.blockSignals(True)
+                    self.combo_style.setCurrentIndex(idx)
+                    self.combo_style.blockSignals(False)
+
+            wcull = bool(data.get("wire_cull", True))
+            ren.wireframe_backface_culling = wcull
+            if hasattr(self, "chk_wire_cull"):
+                self.chk_wire_cull.blockSignals(True)
+                self.chk_wire_cull.setChecked(wcull)
+                self.chk_wire_cull.blockSignals(False)
+
+            ww = float(data.get("wire_width", 1.0))
+            ren.wire_width = ww
+            if hasattr(self, "sl_wire"):
+                self.sl_wire.blockSignals(True)
+                self.sl_wire.setValue(int(ww * 10))
+                self.sl_wire.blockSignals(False)
+                self.lbl_wire.setText(f"Wire {ww:.1f}")
+
+            cw = float(data.get("contour_width", 0.0))
+            ren.contour_width = cw
+            if hasattr(self, "sl_contour"):
+                self.sl_contour.blockSignals(True)
+                self.sl_contour.setValue(int(cw * 10))
+                self.sl_contour.blockSignals(False)
+                self.lbl_contour.setText(f"Contour {cw:.1f}" if cw > 0.05 else "Contour Off")
+
+            if "wire_color" in data:
+                wc = QColor(data["wire_color"])
+                if wc.isValid():
+                    ren.wire_color = wc
+            if "contour_color" in data:
+                cc = QColor(data["contour_color"])
+                if cc.isValid():
+                    ren.contour_color = cc
+
+            bc = QColor(data.get("base_color", "#848ba2"))
+            if bc.isValid():
+                ren.base_color = bc
+                self._update_model_color_button()
+
+            # 5. Studio Lighting
+            lit.azimuth = float(data.get("light_az", 321.0))
+            lit.elevation = float(data.get("light_el", 56.5))
+            lit.ambient = float(data.get("light_ambient", 0.25))
+            lit.diffuse = float(data.get("light_diffuse", 0.55))
+            lit.follow_camera = bool(data.get("light_follow", True))
+
+            if hasattr(self, "light_sphere"):
+                self.light_sphere.set_light(lit.azimuth, lit.elevation)
+            if hasattr(self, "lbl_light"):
+                self.lbl_light.setText(f"Az:{int(lit.azimuth)} El:{int(lit.elevation)}")
+            if hasattr(self, "chk_follow"):
+                self.chk_follow.blockSignals(True)
+                self.chk_follow.setChecked(lit.follow_camera)
+                self.chk_follow.blockSignals(False)
+            if hasattr(self, "sl_amb"):
+                self.sl_amb.blockSignals(True)
+                self.sl_amb.setValue(int(lit.ambient * 100))
+                self.sl_amb.blockSignals(False)
+                self.lbl_amb.setText(f"Ambient {int(lit.ambient * 100)}%")
+            if hasattr(self, "sl_diff"):
+                self.sl_diff.blockSignals(True)
+                self.sl_diff.setValue(int(lit.diffuse * 100))
+                self.sl_diff.blockSignals(False)
+                self.lbl_diff.setText(f"Key {int(lit.diffuse * 100)}%")
+
+            # 6. Perspective Grid
+            gs.enabled = bool(data.get("grid_canvas", True))
+            gs.show_in_viewport = bool(data.get("grid_viewport", True))
+            gs.horizon_enabled = bool(data.get("grid_horizon", True))
+            gs.ground_enabled = bool(data.get("grid_ground", True))
+            gs.ceiling_enabled = bool(data.get("grid_ceiling", False))
+            gs.ceiling_height = float(data.get("grid_ceil_h", 2.5))
+            gs.grid_extent = int(data.get("grid_extent", 10))
+            gs.tile_size = float(data.get("grid_tile", 0.5))
+            gs.subdivisions = int(data.get("grid_subdiv", 1))
+            gs.exceed_lines = bool(data.get("grid_exceed", True))
+            gs.vertical_lines = bool(data.get("grid_verticals", True))
+            gs.vertical_height = float(data.get("grid_vert_h", 2.5))
+            gs.axis_colors = bool(data.get("grid_axis_col", True))
+            gs.grid_opacity = float(data.get("grid_opacity", 0.85))
+            gs.horizon_opacity = float(data.get("horizon_opacity", 0.86))
+
+            if hasattr(self, "chk_grid_canvas"):
+                self.chk_grid_canvas.blockSignals(True)
+                self.chk_grid_canvas.setChecked(gs.enabled)
+                self.chk_grid_canvas.blockSignals(False)
+            if hasattr(self, "chk_grid_viewport"):
+                self.chk_grid_viewport.blockSignals(True)
+                self.chk_grid_viewport.setChecked(gs.show_in_viewport)
+                self.chk_grid_viewport.blockSignals(False)
+            if hasattr(self, "chk_grid_horizon"):
+                self.chk_grid_horizon.blockSignals(True)
+                self.chk_grid_horizon.setChecked(gs.horizon_enabled)
+                self.chk_grid_horizon.blockSignals(False)
+            if hasattr(self, "chk_grid_ground"):
+                self.chk_grid_ground.blockSignals(True)
+                self.chk_grid_ground.setChecked(gs.ground_enabled)
+                self.chk_grid_ground.blockSignals(False)
+            if hasattr(self, "chk_grid_ceiling"):
+                self.chk_grid_ceiling.blockSignals(True)
+                self.chk_grid_ceiling.setChecked(gs.ceiling_enabled)
+                self.chk_grid_ceiling.blockSignals(False)
+            if hasattr(self, "spin_grid_extent"):
+                self.spin_grid_extent.blockSignals(True)
+                self.spin_grid_extent.setValue(gs.grid_extent)
+                self.spin_grid_extent.blockSignals(False)
+            if hasattr(self, "spin_grid_tile"):
+                self.spin_grid_tile.blockSignals(True)
+                self.spin_grid_tile.setValue(gs.tile_size)
+                self.spin_grid_tile.blockSignals(False)
+            if hasattr(self, "spin_grid_cheight"):
+                self.spin_grid_cheight.blockSignals(True)
+                self.spin_grid_cheight.setValue(gs.ceiling_height)
+                self.spin_grid_cheight.blockSignals(False)
+            if hasattr(self, "spin_grid_subdiv"):
+                self.spin_grid_subdiv.blockSignals(True)
+                self.spin_grid_subdiv.setValue(gs.subdivisions)
+                self.spin_grid_subdiv.blockSignals(False)
+            if hasattr(self, "chk_grid_exceed"):
+                self.chk_grid_exceed.blockSignals(True)
+                self.chk_grid_exceed.setChecked(gs.exceed_lines)
+                self.chk_grid_exceed.blockSignals(False)
+            if hasattr(self, "chk_grid_verticals"):
+                self.chk_grid_verticals.blockSignals(True)
+                self.chk_grid_verticals.setChecked(gs.vertical_lines)
+                self.chk_grid_verticals.blockSignals(False)
+            if hasattr(self, "chk_grid_axis"):
+                self.chk_grid_axis.blockSignals(True)
+                self.chk_grid_axis.setChecked(gs.axis_colors)
+                self.chk_grid_axis.blockSignals(False)
+            if hasattr(self, "sl_grid_opac"):
+                self.sl_grid_opac.blockSignals(True)
+                self.sl_grid_opac.setValue(int(gs.grid_opacity * 100))
+                self.sl_grid_opac.blockSignals(False)
+                self.lbl_grid_opac.setText(f"Grid Opacity: {int(gs.grid_opacity * 100)}%")
+            if hasattr(self, "sl_horizon_opac"):
+                self.sl_horizon_opac.blockSignals(True)
+                self.sl_horizon_opac.setValue(int(gs.horizon_opacity * 100))
+                self.sl_horizon_opac.blockSignals(False)
+                self.lbl_horizon_opac.setText(f"Horizon Opacity: {int(gs.horizon_opacity * 100)}%")
+
+            # 7. Canvas Framing
+            if hasattr(self, "chk_use_frame"):
+                use_f = bool(data.get("use_frame", False))
+                fx = int(data.get("frame_x", 0))
+                fy = int(data.get("frame_y", 0))
+                fw = int(data.get("frame_w", 800))
+                fh = int(data.get("frame_h", 600))
+                for spin, val in [(self.spin_fx, fx), (self.spin_fy, fy), (self.spin_fw, fw), (self.spin_fh, fh)]:
+                    spin.blockSignals(True); spin.setValue(val); spin.blockSignals(False)
+                self.chk_use_frame.blockSignals(True)
+                self.chk_use_frame.setChecked(use_f)
+                self.chk_use_frame.blockSignals(False)
+                if use_f:
+                    self.frame_rect = (fx, fy, fw, fh)
+                    self.lbl_frame_info.setText(f"Frame: {fw}×{fh} at ({fx},{fy})")
+                    self.viewport.set_scene_frame(self.frame_rect, f"{fw}×{fh}")
                 else:
-                    default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", "Asaro Head Planes.obj")
-                    if os.path.exists(default_asaro):
-                        self._load_mesh_file(default_asaro)
+                    self.frame_rect = None
+                    self.lbl_frame_info.setText("Full Canvas (No limits)")
+                    self.viewport.clear_scene_frame()
 
+            # 8. Performance & Canvas Sync
+            q = data.get("quality", "Balanced")
+            ren.quality = q
+            if hasattr(self, "combo_quality"):
+                qualities = ["Fast", "Balanced", "High"]
+                idx = qualities.index(q) if q in qualities else 1
+                self.combo_quality.blockSignals(True)
+                self.combo_quality.setCurrentIndex(idx)
+                self.combo_quality.blockSignals(False)
+
+            self.debounce_ms = int(data.get("debounce_ms", 120))
+            if hasattr(self, "spin_debounce"):
+                self.spin_debounce.blockSignals(True)
+                self.spin_debounce.setValue(self.debounce_ms)
+                self.spin_debounce.blockSignals(False)
+
+            tr = bool(data.get("transparent_bg", True))
+            if hasattr(self, "chk_transp"):
+                self.chk_transp.blockSignals(True)
+                self.chk_transp.setChecked(tr)
+                self.chk_transp.blockSignals(False)
+
+            self.custom_bg_color = QColor(data.get("custom_bg", "#ffffff"))
+            if hasattr(self, "btn_bg_col") and self.custom_bg_color.isValid():
+                self.btn_bg_col.setStyleSheet(f"background:{self.custom_bg_color.name()}; color:#000;")
+
+            ls = bool(data.get("live_sync", True))
+            if hasattr(self, "chk_live"):
+                self.chk_live.blockSignals(True)
+                self.chk_live.setChecked(ls)
+                self.chk_live.blockSignals(False)
+
+            # 9. Collapsible Sections
+            sections = [
+                ("sec_viewport", "sec_viewport_exp"),
+                ("sec_presets",  "sec_presets_exp"),
+                ("sec_model",    "sec_model_exp"),
+                ("sec_cam",      "sec_cam_exp"),
+                ("sec_canvas",   "sec_canvas_exp"),
+                ("sec_grid",     "sec_grid_exp"),
+                ("sec_light",    "sec_light_exp"),
+                ("sec_settings", "sec_settings_exp"),
+            ]
+            for attr, key in sections:
+                if key in data and hasattr(self, attr):
+                    sec = getattr(self, attr)
+                    sec.set_expanded(bool(data[key]))
+
+            # 10. Final UI & Viewport Sync
             self._sync_ui()
             self.viewport.update()
         except Exception as e:
             import traceback; traceback.print_exc()
+        finally:
+            self._restoring_session = False

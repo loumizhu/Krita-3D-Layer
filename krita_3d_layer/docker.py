@@ -1128,9 +1128,9 @@ class Krita3DLayerDocker(DockWidget):
         disp_hdr.setStyleSheet("font-weight:bold;")
         self.sec_settings.add_widget(disp_hdr)
 
-        self.chk_show_overlay = QCheckBox("Show Right Overlay Buttons (Orbit, Pan, Zoom, Tilt)")
+        self.chk_show_overlay = QCheckBox("Show Viewport Overlay Nav Buttons")
         self.chk_show_overlay.setChecked(True)
-        self.chk_show_overlay.setToolTip("Show/hide the mini overlay buttons on the right edge of the viewport")
+        self.chk_show_overlay.setToolTip("Show/hide mini navigation buttons on the right edge of the viewport (Orbit, Pan, Zoom, Lens Tilt, Roll)")
         self.chk_show_overlay.stateChanged.connect(self._on_toggle_overlay_buttons)
         self.sec_settings.add_widget(self.chk_show_overlay)
 

@@ -33,6 +33,8 @@ CAMERA_MODES = [CAMERA_MODE_ORBIT, CAMERA_MODE_TURNTABLE, CAMERA_MODE_FIRST_PERS
 _INFO_FIELDS = [
     ("Y", "Yaw"),
     ("P", "Pitch"),
+    ("T", "Tilt"),
+    ("R", "Roll"),
     ("D", "Distance"),
     ("F", "FOV"),
 ]
@@ -135,20 +137,21 @@ class Viewport3D(QWidget):
         if not self.show_overlay_buttons:
             return []
         w, h = self.width(), self.height()
-        if w < 50 or h < 80:
+        if w < 50 or h < 60:
             return []
 
-        btn_size     = 20
-        margin_right = 5
-        spacing      = 3
+        spacing      = 2
         buttons = [
-            ("orbit", "⟳", "Orbit Camera (Drag)"),
-            ("pan",   "✥", "Pan Camera (Drag)"),
-            ("zoom",  "🔍", "Zoom Camera (Drag)"),
-            ("tilt",  "↔", "Lens Tilt (Drag up/down)"),
+            ("orbit", "⟳", "Orbit View: Drag to rotate (Click to reset 3/4)"),
+            ("pan",   "✥", "Pan View: Drag to pan (Click to center)"),
+            ("zoom",  "🔍", "Zoom View: Drag to zoom (Click to frame)"),
+            ("tilt",  "↕", "Lens Tilt: Drag up/down or left/right (Click to reset 0°)"),
+            ("roll",  "↺", "Camera Roll / Tilt: Drag to tilt sideways (Click to reset 0°)"),
         ]
+        btn_size = min(20, max(14, (h - 16) // len(buttons) - spacing))
+        margin_right = 4
         total_h = len(buttons) * btn_size + (len(buttons) - 1) * spacing
-        start_y = max(8, (h - total_h) // 2)
+        start_y = max(6, (h - total_h) // 2)
         res = []
         for i, (act, sym, tip) in enumerate(buttons):
             rx = w - margin_right - btn_size
@@ -161,16 +164,16 @@ class Viewport3D(QWidget):
     # ------------------------------------------------------------------
     def _get_info_field_rects(self):
         """Returns list of (field_id, QRect) for the top-left info overlay."""
-        if not (self.mesh and self.width() > 100 and self.height() > 40):
+        if not (self.width() > 80 and self.height() > 40):
             return []
         font_size = max(7, min(8, int(self.width() * 0.038)))
-        char_w = font_size * 5    # approx pixels per char at that size
         rects = []
         x = 4
         for fid, _ in _INFO_FIELDS:
-            r = QRect(x, 2, char_w + 4, 14)
+            f_w = 34 if fid in ("Y", "P", "T", "R") else 30
+            r = QRect(x, 2, f_w, 14)
             rects.append((fid, r))
-            x += char_w + 8
+            x += f_w + 3
         return rects
 
     # ------------------------------------------------------------------
@@ -304,6 +307,8 @@ class Viewport3D(QWidget):
         c = self.camera
         if fid == "Y": return c.yaw
         if fid == "P": return c.pitch
+        if fid == "T": return c.tilt
+        if fid == "R": return c.roll
         if fid == "D": return c.distance
         if fid == "F": return c.fov
         return 0.0
@@ -312,6 +317,8 @@ class Viewport3D(QWidget):
         c = self.camera
         if fid == "Y":   c.yaw      = val % 360.0
         elif fid == "P": c.pitch    = max(-89.9, min(89.9, val))
+        elif fid == "T": c.tilt     = max(-89.9, min(89.9, val))
+        elif fid == "R": c.roll     = max(-180.0, min(180.0, val))
         elif fid == "D": c.distance = max(0.05, min(50.0, val))
         elif fid == "F": c.fov      = max(5.0, min(140.0, val))
 
@@ -322,7 +329,10 @@ class Viewport3D(QWidget):
         if self._info_scrub_field and self.is_dragging:
             dx    = pos.x() - self._info_scrub_start_x
             field = self._info_scrub_field
-            speed = {"Y": 0.8, "P": 0.5, "D": 0.01 * max(0.1, self.camera.distance), "F": 0.4}.get(field, 0.5)
+            speed = {
+                "Y": 0.8, "P": 0.5, "T": 0.5, "R": 0.6,
+                "D": 0.01 * max(0.1, self.camera.distance), "F": 0.4
+            }.get(field, 0.5)
             new_val = self._info_scrub_start_val + dx * speed
             self._set_cam_field(field, new_val)
             self.camera_changed.emit()
@@ -382,7 +392,12 @@ class Viewport3D(QWidget):
                 self.camera.distance = max(0.05, min(50.0, self.camera.distance + (dy - dx) * zoom_speed))
             elif self.active_overlay_action == "tilt":
                 tilt_speed = 0.5
-                self.camera.tilt = max(-89.9, min(89.9, self.camera.tilt - dy * tilt_speed))
+                drag_delta = -dy if abs(dy) >= abs(dx) else dx
+                self.camera.tilt = max(-89.9, min(89.9, self.camera.tilt + drag_delta * tilt_speed))
+            elif self.active_overlay_action == "roll":
+                roll_speed = 0.5
+                drag_delta = dx if abs(dx) >= abs(dy) else -dy
+                self.camera.roll = max(-180.0, min(180.0, self.camera.roll + drag_delta * roll_speed))
             self.camera_changed.emit()
             self.update()
             return
@@ -495,6 +510,8 @@ class Viewport3D(QWidget):
                     self.frame_object()
                 elif self.active_overlay_action == "tilt":
                     self.camera.tilt = 0.0
+                elif self.active_overlay_action == "roll":
+                    self.camera.roll = 0.0
                 self.camera_changed.emit()
 
             self.active_overlay_action = None
@@ -608,7 +625,7 @@ class Viewport3D(QWidget):
                 self._draw_gizmo_with_hit_rects(painter, ox, oy, gizmo_size)
 
         # 6. Info overlay (top-left) with scrub highlights
-        if self.mesh and w > 100 and h > 40:
+        if (self.mesh or (self.grid_settings and (self.grid_settings.enabled or self.grid_settings.show_in_viewport))) and w > 80 and h > 40:
             self._draw_info_bar(painter)
 
         # 7. Overlay nav buttons (right side)
@@ -636,18 +653,19 @@ class Viewport3D(QWidget):
         painter.end()
 
     def _draw_info_bar(self, painter):
-        """Draw scrub-able info bar at top-left with Y/P/D/F labels."""
+        """Draw scrub-able info bar at top-left with Y/P/T/R/D/F labels."""
         c = self.camera
         fields = [
             ("Y", f"{c.yaw:.0f}°"),
             ("P", f"{c.pitch:.0f}°"),
+            ("T", f"{c.tilt:.0f}°"),
+            ("R", f"{c.roll:.0f}°"),
             ("D", f"{c.distance:.1f}"),
             ("F", f"{c.fov:.0f}°"),
         ]
         font_size = max(7, min(8, int(self.width() * 0.038)))
         painter.setFont(QFont("Segoe UI", font_size))
 
-        x = 4
         for (fid, val), (_, rect) in zip(fields, self._get_info_field_rects()):
             is_hovered = (self._info_hovered_field == fid)
             is_scrubbing = (self._info_scrub_field == fid)

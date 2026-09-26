@@ -40,10 +40,28 @@ def pack():
         zf.write(DESKTOP_FILE, "krita_3d_layer.desktop")
         print(f"  + krita_3d_layer.desktop")
 
-        # Add all .py files from the package
+        # Explicitly add the main module directory entry (required by Krita's PluginImporter)
+        main_dir_info = zipfile.ZipInfo("krita_3d_layer/")
+        main_dir_info.external_attr = 0o755 << 16 | 0x10
+        zf.writestr(main_dir_info, "")
+        print(f"  + krita_3d_layer/ (directory)")
+
+        added_dirs = {"krita_3d_layer/"}
+
+        # Add all .py files and assets from the package
         for root, dirs, files in os.walk(PACKAGE_DIR):
             # Skip __pycache__ directories
             dirs[:] = [d for d in dirs if d != "__pycache__"]
+
+            for d in sorted(dirs):
+                dir_path = os.path.join(root, d)
+                rel_dir = os.path.relpath(dir_path, SOURCE_DIR).replace("\\", "/") + "/"
+                if rel_dir not in added_dirs:
+                    added_dirs.add(rel_dir)
+                    dinfo = zipfile.ZipInfo(rel_dir)
+                    dinfo.external_attr = 0o755 << 16 | 0x10
+                    zf.writestr(dinfo, "")
+                    print(f"  + {rel_dir} (directory)")
 
             for filename in sorted(files):
                 filepath = os.path.join(root, filename)

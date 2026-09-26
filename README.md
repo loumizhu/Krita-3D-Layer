@@ -45,7 +45,7 @@ Krita can install plugins directly over the web:
 2. In the top menu, go to **Tools → Scripts → Import Python Plugin from Web...**
 3. Paste this direct URL:
    ```text
-   https://github.com/loumizhu/Krita-3D-Layer/releases/latest/download/krita_3d_layer.zip
+   https://github.com/loumizhu/Krita-3D-Layer
    ```
 4. Click **OK**. Krita will automatically download and unpack the plugin.
 5. Restart Krita.
@@ -64,7 +64,7 @@ Krita can install plugins directly over the web:
 
 > 💡 **Built-in Manual:** In **Settings → Configure Krita → Python Plugin Manager**, select **Krita 3D Layer** and click the **Manual** button to open the full illustrated user guide! You can also click the **❓ Manual** button directly in the docker toolbar.
 
-### Option C — Manual Install (from source)
+### Option C — Annoying Install (from source)
 
 1. Clone this repository:
    ```bash

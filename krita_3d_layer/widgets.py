@@ -8,7 +8,7 @@ Includes:
 import math
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFrame, QSizePolicy, QSpinBox, QDoubleSpinBox
+    QFrame, QSizePolicy, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
 )
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QRadialGradient,
@@ -326,9 +326,21 @@ class ScrubbableSpinBox(QSpinBox):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.setAlignment(Qt.AlignCenter)
         self._drag_start_pos = None
         self._drag_start_val = 0
         self._is_dragging = False
+
+    def enterEvent(self, event):
+        if not self.hasFocus():
+            self.setCursor(Qt.SizeHorCursor)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._is_dragging:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -342,6 +354,9 @@ class ScrubbableSpinBox(QSpinBox):
             dx = event.pos().x() - self._drag_start_pos.x()
             if not self._is_dragging and abs(dx) >= 3:
                 self._is_dragging = True
+                self.setCursor(Qt.SizeHorCursor)
+                if self.lineEdit():
+                    self.lineEdit().deselect()
             if self._is_dragging:
                 step = self.singleStep() or 1
                 factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
@@ -356,10 +371,15 @@ class ScrubbableSpinBox(QSpinBox):
         if self._is_dragging:
             self._is_dragging = False
             self._drag_start_pos = None
+            self.unsetCursor()
             event.accept()
             return
         self._drag_start_pos = None
         super().mouseReleaseEvent(event)
+        # Click without dragging: select text for direct typing!
+        if self.lineEdit():
+            self.lineEdit().setFocus()
+            self.lineEdit().selectAll()
 
 
 class ScrubbableDoubleSpinBox(QDoubleSpinBox):
@@ -368,9 +388,21 @@ class ScrubbableDoubleSpinBox(QDoubleSpinBox):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.setAlignment(Qt.AlignCenter)
         self._drag_start_pos = None
         self._drag_start_val = 0.0
         self._is_dragging = False
+
+    def enterEvent(self, event):
+        if not self.hasFocus():
+            self.setCursor(Qt.SizeHorCursor)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._is_dragging:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -384,6 +416,9 @@ class ScrubbableDoubleSpinBox(QDoubleSpinBox):
             dx = event.pos().x() - self._drag_start_pos.x()
             if not self._is_dragging and abs(dx) >= 3:
                 self._is_dragging = True
+                self.setCursor(Qt.SizeHorCursor)
+                if self.lineEdit():
+                    self.lineEdit().deselect()
             if self._is_dragging:
                 step = self.singleStep() or 0.1
                 factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
@@ -398,10 +433,15 @@ class ScrubbableDoubleSpinBox(QDoubleSpinBox):
         if self._is_dragging:
             self._is_dragging = False
             self._drag_start_pos = None
+            self.unsetCursor()
             event.accept()
             return
         self._drag_start_pos = None
         super().mouseReleaseEvent(event)
+        # Click without dragging: select text for direct typing!
+        if self.lineEdit():
+            self.lineEdit().setFocus()
+            self.lineEdit().selectAll()
 
 
 class ViewportResizeHandle(QWidget):

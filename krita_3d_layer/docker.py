@@ -436,8 +436,18 @@ DOCKER_STYLE = """
     QSlider::handle:horizontal:hover { background: #fff; }
     QDoubleSpinBox, QSpinBox {
         font-size: 9px; min-height: 17px; padding: 1px 2px;
-        background: #262932; border: 1px solid #3d4352;
+        background: #1e222b; border: 1px solid #3d4352;
         border-radius: 2px; color: #e5e7eb;
+    }
+    QDoubleSpinBox:hover, QSpinBox:hover {
+        background: #282d39; border-color: #38bdf8;
+    }
+    QDoubleSpinBox:focus, QSpinBox:focus {
+        background: #0f172a; border-color: #60a5fa; color: #ffffff;
+    }
+    QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+    QSpinBox::up-button, QSpinBox::down-button {
+        width: 0px; height: 0px; border: none;
     }
 """
 
@@ -559,19 +569,21 @@ class Krita3DLayerDocker(DockWidget):
         self.combo_presets.activated.connect(self._on_preset_activated)
         pr_row.addWidget(self.combo_presets, 1)
 
-        self.btn_save_preset = QPushButton("💾 Save...")
+        self.btn_save_preset = QPushButton("💾")
+        self.btn_save_preset.setFixedSize(22, 20)
         self.btn_save_preset.setToolTip("Save current parameters as a new custom preset")
         self.btn_save_preset.clicked.connect(self._save_custom_preset)
         pr_row.addWidget(self.btn_save_preset, 0)
 
         self.btn_del_preset = QPushButton("🗑")
-        self.btn_del_preset.setFixedSize(24, 22)
+        self.btn_del_preset.setFixedSize(22, 20)
         self.btn_del_preset.setToolTip("Delete custom preset")
         self.btn_del_preset.clicked.connect(self._delete_custom_preset)
         pr_row.addWidget(self.btn_del_preset, 0)
 
-        self.btn_help_manual = QPushButton("❓ Manual")
-        self.btn_help_manual.setStyleSheet("background:#1e293b; color:#93c5fd; font-weight:bold; padding:2px 6px; border:1px solid #3b82f6;")
+        self.btn_help_manual = QPushButton("❓")
+        self.btn_help_manual.setFixedSize(22, 20)
+        self.btn_help_manual.setStyleSheet("background:#1e293b; color:#93c5fd; font-weight:bold; border:1px solid #3b82f6;")
         self.btn_help_manual.setToolTip("Open Krita 3D Layer Manual & Quick Guide")
         self.btn_help_manual.clicked.connect(self._open_manual)
         pr_row.addWidget(self.btn_help_manual, 0)
@@ -586,7 +598,7 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_model = CollapsibleSection("MODEL & MATERIAL", expanded=True)
 
         mr = QHBoxLayout(); mr.setSpacing(2)
-        bi = QPushButton("📁 Import 3D")
+        bi = QPushButton("📁 Import")
         bi.setToolTip("Import 3D model (.obj, .stl, .glb, .gltf)")
         bi.clicked.connect(self._import)
         mr.addWidget(bi, 2)
@@ -602,7 +614,7 @@ class Krita3DLayerDocker(DockWidget):
 
         # Dedicated square color button with live swatch preview for 3D model color
         self.btn_model_color = QPushButton("🎨")
-        self.btn_model_color.setFixedSize(28, 22)
+        self.btn_model_color.setFixedSize(24, 20)
         self.btn_model_color.setToolTip("Change 3D Model Material Color (Light Grey, Clay, Plaster, Skin, etc.)")
         self.btn_model_color.clicked.connect(self._pick_model_color)
         self._update_model_color_button()
@@ -634,7 +646,7 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_wire_cull.stateChanged.connect(self._on_wire_cull)
         wire_opts_row.addWidget(self.chk_wire_cull, 0)
 
-        self.chk_hide_coplanar = QCheckBox("Quad Wire (Hide Diagonals)")
+        self.chk_hide_coplanar = QCheckBox("Quad Wire")
         self.chk_hide_coplanar.setChecked(True)
         self.chk_hide_coplanar.setToolTip("Hide internal triangulation diagonals on flat faces and quads (Blender quad-style wireframe)")
         self.chk_hide_coplanar.stateChanged.connect(self._on_hide_coplanar)
@@ -773,9 +785,9 @@ class Krita3DLayerDocker(DockWidget):
 
         # Pitch (Tilt up/down)
         tr_pitch = QHBoxLayout(); tr_pitch.setSpacing(1)
-        self.lbl_tilt = QLabel("Orbit Pitch 12°")
+        self.lbl_tilt = QLabel("Pitch 12°")
         tr_pitch.addWidget(self.lbl_tilt)
-        b_p0 = QPushButton("0°"); b_p0.setToolTip("Level orbit pitch to 0°"); b_p0.clicked.connect(self._reset_pitch)
+        b_p0 = QPushButton("0"); b_p0.setFixedSize(20, 18); b_p0.setToolTip("Level orbit pitch to 0°"); b_p0.clicked.connect(self._reset_pitch)
         tr_pitch.addWidget(b_p0)
         self.sec_cam.add_layout(tr_pitch)
         self.sl_tilt = self._slider(-89, 89, 12, self._on_tilt)
@@ -783,7 +795,7 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_cam.add_widget(self.sl_tilt)
 
         # Azimuth / Yaw
-        self.lbl_yaw = QLabel("Orbit Yaw 145°")
+        self.lbl_yaw = QLabel("Yaw 145°")
         self.sec_cam.add_widget(self.lbl_yaw)
         self.sl_yaw = self._slider(0, 360, 145, self._on_yaw)
         self.sl_yaw.setToolTip("Horizontal orbit azimuth around target (0° to 360°)")
@@ -791,10 +803,10 @@ class Krita3DLayerDocker(DockWidget):
 
         # Lens Tilt (optical axis shift)
         tr_ltilt = QHBoxLayout(); tr_ltilt.setSpacing(1)
-        self.lbl_lens_tilt = QLabel("Lens Tilt 0°")
+        self.lbl_lens_tilt = QLabel("Tilt 0°")
         self.lbl_lens_tilt.setStyleSheet("font-weight:bold; color:#38bdf8;")
         tr_ltilt.addWidget(self.lbl_lens_tilt)
-        b_llevel = QPushButton("0°"); b_llevel.setToolTip("Set camera lens tilt to 0°"); b_llevel.clicked.connect(self._reset_lens_tilt)
+        b_llevel = QPushButton("0"); b_llevel.setFixedSize(20, 18); b_llevel.setToolTip("Set camera lens tilt to 0°"); b_llevel.clicked.connect(self._reset_lens_tilt)
         tr_ltilt.addWidget(b_llevel)
         self.sec_cam.add_layout(tr_ltilt)
         self.sl_lens_tilt = self._slider(-89, 89, 0, self._on_lens_tilt)
@@ -805,7 +817,7 @@ class Krita3DLayerDocker(DockWidget):
         rr = QHBoxLayout(); rr.setSpacing(1)
         self.lbl_roll = QLabel("Roll 0°")
         rr.addWidget(self.lbl_roll)
-        b_r0 = QPushButton("0°"); b_r0.setToolTip("Reset camera roll to 0°"); b_r0.clicked.connect(self._reset_roll)
+        b_r0 = QPushButton("0"); b_r0.setFixedSize(20, 18); b_r0.setToolTip("Reset camera roll to 0°"); b_r0.clicked.connect(self._reset_roll)
         rr.addWidget(b_r0)
         self.sec_cam.add_layout(rr)
         self.sl_roll = self._slider(-180, 180, 0, self._on_roll)
@@ -852,40 +864,44 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_cam.add_widget(self.sl_dist)
 
         pan_row = QHBoxLayout(); pan_row.setSpacing(1)
-        pan_row.addWidget(QLabel("Pan X/Y:"))
+        pan_lbl = QLabel("Pan:"); pan_lbl.setStyleSheet("font-size:9px; color:#94a3b8;")
+        pan_row.addWidget(pan_lbl)
         self.spin_pan_x = self._dspin(-50.0, 50.0, 0.0, 0.1, self._on_pan_spins)
-        self.spin_pan_x.setToolTip("Camera screen pan horizontal offset")
+        self.spin_pan_x.setToolTip("Pan X: Screen pan horizontal offset (drag left/right to scrub, click to type)")
         self.spin_pan_y = self._dspin(-50.0, 50.0, 0.0, 0.1, self._on_pan_spins)
-        self.spin_pan_y.setToolTip("Camera screen pan vertical offset")
-        b_pan_rst = QPushButton("0"); b_pan_rst.setToolTip("Reset pan to (0, 0)"); b_pan_rst.clicked.connect(self._reset_pan)
+        self.spin_pan_y.setToolTip("Pan Y: Screen pan vertical offset (drag left/right to scrub, click to type)")
+        b_pan_rst = QPushButton("0"); b_pan_rst.setFixedSize(20, 18); b_pan_rst.setToolTip("Reset pan to (0, 0)"); b_pan_rst.clicked.connect(self._reset_pan)
         pan_row.addWidget(self.spin_pan_x); pan_row.addWidget(self.spin_pan_y); pan_row.addWidget(b_pan_rst)
         self.sec_cam.add_layout(pan_row)
 
         # Look-at Target XYZ
         tl = QLabel("Target XYZ:")
-        tl.setStyleSheet("font-weight:bold;")
+        tl.setStyleSheet("font-weight:bold; font-size:9px;")
         self.sec_cam.add_widget(tl)
         tr = QHBoxLayout(); tr.setSpacing(1)
         self.spin_tx = self._dspin(-50, 50, 0.0, 0.1, self._on_target)
-        self.spin_tx.setToolTip("Target world X position (scrub left/right)")
+        self.spin_tx.setToolTip("Target world X position (drag left/right to scrub, click to type)")
         self.spin_ty = self._dspin(-50, 50, 0.0, 0.1, self._on_target)
-        self.spin_ty.setToolTip("Target world Y height position (scrub left/right)")
+        self.spin_ty.setToolTip("Target world Y height position (drag left/right to scrub, click to type)")
         self.spin_tz = self._dspin(-50, 50, 0.0, 0.1, self._on_target)
-        self.spin_tz.setToolTip("Target world Z depth position (scrub left/right)")
+        self.spin_tz.setToolTip("Target world Z depth position (drag left/right to scrub, click to type)")
         tr.addWidget(self.spin_tx); tr.addWidget(self.spin_ty); tr.addWidget(self.spin_tz)
         self.sec_cam.add_layout(tr)
 
-        # Frame / Center / Origin quick actions (moved here from Model section)
+        # Frame / Center / Origin quick actions
         cam_frame_row = QHBoxLayout(); cam_frame_row.setSpacing(2)
         btn_cam_frame = QPushButton("🎯 Frame")
+        btn_cam_frame.setStyleSheet("font-size:9px; padding:2px 3px;")
         btn_cam_frame.setToolTip("Frame 3D model in view (double-click viewport)")
         btn_cam_frame.clicked.connect(self._frame_view)
         cam_frame_row.addWidget(btn_cam_frame)
         btn_cam_center = QPushButton("⌖ Center")
+        btn_cam_center.setStyleSheet("font-size:9px; padding:2px 3px;")
         btn_cam_center.setToolTip("Move camera target to model center")
         btn_cam_center.clicked.connect(self._center_on_model)
         cam_frame_row.addWidget(btn_cam_center)
         btn_cam_origin = QPushButton("Origin")
+        btn_cam_origin.setStyleSheet("font-size:9px; padding:2px 3px;")
         btn_cam_origin.setToolTip("Reset camera target to world origin (0,0,0)")
         btn_cam_origin.clicked.connect(self._center_origin)
         cam_frame_row.addWidget(btn_cam_origin)
@@ -899,8 +915,8 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_canvas = CollapsibleSection("GROUND & FRAMING", expanded=True)
 
         calib_row = QHBoxLayout(); calib_row.setSpacing(2)
-        btn_ground = QPushButton("📐 Ground Rect...")
-        btn_ground.setStyleSheet("background:#2e3440; color:#fef08a; font-weight:bold; padding:4px 6px; border:1px solid #4c566a;")
+        btn_ground = QPushButton("📐 Ground Rect")
+        btn_ground.setStyleSheet("background:#2e3440; color:#fef08a; font-weight:bold; padding:3px 4px; border:1px solid #4c566a; font-size:9px;")
         btn_ground.setToolTip(
             "Draw or adjust 4 ground points on your canvas to solve camera angles and place the 3D model directly on top.\n"
             "This draws a rectangle if you already have drawn on your canvas an object that you want to have a 3D overhead so it quickly fits."
@@ -909,13 +925,13 @@ class Krita3DLayerDocker(DockWidget):
         calib_row.addWidget(btn_ground, 3)
 
         btn_full_canv = QPushButton("🖥️ Full")
-        btn_full_canv.setStyleSheet("background:#1e293b; color:#e2e8f0; font-weight:bold; padding:4px 4px; border:1px solid #334155;")
+        btn_full_canv.setStyleSheet("background:#1e293b; color:#e2e8f0; font-weight:bold; padding:3px 3px; border:1px solid #334155; font-size:9px;")
         btn_full_canv.setToolTip("Match viewport ratio to full Krita canvas (clears frame limit)")
         btn_full_canv.clicked.connect(self._use_full_canvas)
         calib_row.addWidget(btn_full_canv, 1)
 
-        btn_draw_frame = QPushButton("✏️ Draw Frame")
-        btn_draw_frame.setStyleSheet("background:#1e293b; color:#93c5fd; font-weight:bold; padding:4px 4px; border:1px solid #2563eb;")
+        btn_draw_frame = QPushButton("✏️ Frame")
+        btn_draw_frame.setStyleSheet("background:#1e293b; color:#93c5fd; font-weight:bold; padding:3px 3px; border:1px solid #2563eb; font-size:9px;")
         btn_draw_frame.setToolTip("Define the frame of the 3D scene from active rectangular selection on canvas")
         btn_draw_frame.clicked.connect(self._draw_frame_action)
         calib_row.addWidget(btn_draw_frame, 2)
@@ -966,12 +982,12 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_grid = CollapsibleSection("3D PERSPECTIVE GRIDS", expanded=True)
 
         gr_toggles = QHBoxLayout(); gr_toggles.setSpacing(2)
-        self.chk_grid_canvas = QCheckBox("Grid on Canvas")
+        self.chk_grid_canvas = QCheckBox("Canvas Grid")
         self.chk_grid_canvas.setToolTip("Draw 3D perspective grid directly onto the Krita canvas layer (with or without 3D model)")
         self.chk_grid_canvas.stateChanged.connect(self._on_grid_changed)
         gr_toggles.addWidget(self.chk_grid_canvas)
 
-        self.chk_grid_viewport = QCheckBox("In Viewport")
+        self.chk_grid_viewport = QCheckBox("Viewport")
         self.chk_grid_viewport.setChecked(True)
         self.chk_grid_viewport.setToolTip("Show perspective grid in 3D viewport")
         self.chk_grid_viewport.stateChanged.connect(self._on_grid_changed)
@@ -990,55 +1006,69 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_grid_ground.setToolTip("Draw ground floor perspective grid squares")
         self.chk_grid_ground.stateChanged.connect(self._on_grid_changed)
         hr_row.addWidget(self.chk_grid_ground)
+        self.sec_grid.add_layout(hr_row)
 
-        self.chk_grid_ceiling = QCheckBox("Ceiling Grid (Above)")
+        ceil_row = QHBoxLayout(); ceil_row.setSpacing(2)
+        self.chk_grid_ceiling = QCheckBox("Ceiling Grid")
         self.chk_grid_ceiling.setChecked(False)
         self.chk_grid_ceiling.setToolTip("Draw a matching ceiling grid above the scene at ceiling height")
         self.chk_grid_ceiling.stateChanged.connect(self._on_grid_changed)
-        hr_row.addWidget(self.chk_grid_ceiling)
-        self.sec_grid.add_layout(hr_row)
-
-        # Grid parameters: Extent, Tile Size, Ceiling Height, Subdivisions
-        g_grid = QGridLayout(); g_grid.setSpacing(1)
-        g_grid.addWidget(QLabel("Tiles:"), 0, 0)
-        self.spin_grid_extent = self._ispin(2, 60, 10, 1, self._on_grid_changed)
-        self.spin_grid_extent.setToolTip("Number of grid tiles from origin in each direction (drag left/right to scrub)")
-        g_grid.addWidget(self.spin_grid_extent, 0, 1)
-
-        g_grid.addWidget(QLabel("Size:"), 0, 2)
-        self.spin_grid_tile = self._dspin(0.05, 10.0, 0.5, 0.05, self._on_grid_changed)
-        self.spin_grid_tile.setToolTip("Size of each square tile in 3D units (drag left/right to scrub)")
-        g_grid.addWidget(self.spin_grid_tile, 0, 3)
-
-        g_grid.addWidget(QLabel("Ceil H:"), 1, 0)
-        self.spin_grid_cheight = self._dspin(0.5, 20.0, 2.5, 0.2, self._on_grid_changed)
-        self.spin_grid_cheight.setToolTip("Height of ceiling grid above the floor in 3D units")
-        g_grid.addWidget(self.spin_grid_cheight, 1, 1)
-
-        g_grid.addWidget(QLabel("Subdiv:"), 1, 2)
-        self.spin_grid_subdiv = self._ispin(1, 10, 1, 1, self._on_grid_changed)
-        self.spin_grid_subdiv.setToolTip("Subdivisions per square tile")
-        g_grid.addWidget(self.spin_grid_subdiv, 1, 3)
-        self.sec_grid.add_layout(g_grid)
-
-        # Vanishing extension & Height poles
-        g_extra = QHBoxLayout(); g_extra.setSpacing(2)
-        self.chk_grid_exceed = QCheckBox("Extend to Horizon")
-        self.chk_grid_exceed.setChecked(True)
-        self.chk_grid_exceed.setToolTip("Extend grid lines deep into the distance to vanishing points")
-        self.chk_grid_exceed.stateChanged.connect(self._on_grid_changed)
-        g_extra.addWidget(self.chk_grid_exceed)
+        ceil_row.addWidget(self.chk_grid_ceiling)
 
         self.chk_grid_verticals = QCheckBox("Height Poles")
         self.chk_grid_verticals.setChecked(True)
         self.chk_grid_verticals.setToolTip("Draw vertical guide poles for 3D vertical perspective")
         self.chk_grid_verticals.stateChanged.connect(self._on_grid_changed)
-        g_extra.addWidget(self.chk_grid_verticals)
-        self.sec_grid.add_layout(g_extra)
+        ceil_row.addWidget(self.chk_grid_verticals)
+        self.sec_grid.add_layout(ceil_row)
 
-        self.chk_grid_axis = QCheckBox("Color XYZ Axes (Red X, Blue Z, Green Y)")
+        # Grid parameters: Extent, Tile Size, Ceiling Height, Subdivisions
+        p_row1 = QHBoxLayout(); p_row1.setSpacing(2)
+        lbl_tiles = QLabel("Tiles:"); lbl_tiles.setStyleSheet("font-size:9px; color:#94a3b8;")
+        p_row1.addWidget(lbl_tiles)
+        self.spin_grid_extent = self._ispin(2, 60, 10, 1, self._on_grid_changed)
+        self.spin_grid_extent.setToolTip("Number of grid tiles from origin in each direction (drag left/right to scrub, click to type)")
+        p_row1.addWidget(self.spin_grid_extent, 1)
+
+        lbl_size = QLabel("Size:"); lbl_size.setStyleSheet("font-size:9px; color:#94a3b8;")
+        p_row1.addWidget(lbl_size)
+        self.spin_grid_tile = self._dspin(0.05, 10.0, 0.5, 0.05, self._on_grid_changed)
+        self.spin_grid_tile.setToolTip("Size of each square tile in 3D units (drag left/right to scrub, click to type)")
+        p_row1.addWidget(self.spin_grid_tile, 1)
+        self.sec_grid.add_layout(p_row1)
+
+        p_row2 = QHBoxLayout(); p_row2.setSpacing(2)
+        lbl_cheight = QLabel("Ceil H:"); lbl_cheight.setStyleSheet("font-size:9px; color:#94a3b8;")
+        p_row2.addWidget(lbl_cheight)
+        self.spin_grid_cheight = self._dspin(0.5, 20.0, 2.5, 0.2, self._on_grid_changed)
+        self.spin_grid_cheight.setToolTip("Height of ceiling grid above the floor in 3D units (drag left/right to scrub, click to type)")
+        p_row2.addWidget(self.spin_grid_cheight, 1)
+
+        lbl_subdiv = QLabel("Subdiv:"); lbl_subdiv.setStyleSheet("font-size:9px; color:#94a3b8;")
+        p_row2.addWidget(lbl_subdiv)
+        self.spin_grid_subdiv = self._ispin(1, 10, 1, 1, self._on_grid_changed)
+        self.spin_grid_subdiv.setToolTip("Subdivisions per square tile (drag left/right to scrub, click to type)")
+        p_row2.addWidget(self.spin_grid_subdiv, 1)
+        self.sec_grid.add_layout(p_row2)
+
+        # Horizon extension & Horizon Fading
+        fade_row = QHBoxLayout(); fade_row.setSpacing(2)
+        self.chk_grid_exceed = QCheckBox("Extend Horizon")
+        self.chk_grid_exceed.setChecked(True)
+        self.chk_grid_exceed.setToolTip("Extend grid lines deep into the distance toward horizon")
+        self.chk_grid_exceed.stateChanged.connect(self._on_grid_changed)
+        fade_row.addWidget(self.chk_grid_exceed)
+
+        self.chk_fade_grid = QCheckBox("Fade Horizon")
+        self.chk_fade_grid.setChecked(True)
+        self.chk_fade_grid.setToolTip("Activate Fading Grid: Grid lines extend to the horizon line but fade out smoothly little by little")
+        self.chk_fade_grid.stateChanged.connect(self._on_grid_changed)
+        fade_row.addWidget(self.chk_fade_grid)
+        self.sec_grid.add_layout(fade_row)
+
+        self.chk_grid_axis = QCheckBox("Color XYZ Axes")
         self.chk_grid_axis.setChecked(True)
-        self.chk_grid_axis.setToolTip("Highlight primary 3D world axes with color")
+        self.chk_grid_axis.setToolTip("Highlight primary 3D world axes with color (Red X, Blue Z, Green Y)")
         self.chk_grid_axis.stateChanged.connect(self._on_grid_changed)
         self.sec_grid.add_widget(self.chk_grid_axis)
 
@@ -1066,7 +1096,8 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_follow.setToolTip("Key light follows camera orbit angle so front faces are always illuminated")
         self.chk_follow.stateChanged.connect(self._on_follow)
         sc.addWidget(self.chk_follow)
-        rl = QPushButton("Reset Light")
+        rl = QPushButton("Rst")
+        rl.setFixedSize(30, 20)
         rl.setToolTip("Reset lighting to standard studio angle")
         rl.clicked.connect(self._reset_light)
         sc.addWidget(rl)
@@ -1268,6 +1299,11 @@ class Krita3DLayerDocker(DockWidget):
         menu = QMenu(self.btn_primitives)
         menu.setStyleSheet("QMenu { background:#1e293b; color:#e2e8f0; font-size:11px; } QMenu::item:selected { background:#2563eb; }")
 
+        action_grid_only = menu.addAction("🌐 No Object -Only Grid")
+        action_grid_only.setToolTip("Clear 3D model and activate perspective grid for drawing guides")
+        action_grid_only.triggered.connect(self._select_no_object_only_grid)
+        menu.addSeparator()
+
         base_dir = os.path.dirname(os.path.abspath(__file__))
         prim_dir = os.path.join(base_dir, "3D-Primitive")
 
@@ -1283,6 +1319,24 @@ class Krita3DLayerDocker(DockWidget):
                     action.triggered.connect(lambda checked, p=path: self._load_file(p))
 
         self.btn_primitives.setMenu(menu)
+
+    def _select_no_object_only_grid(self):
+        self.mesh = None
+        self.mesh_path = None
+        self.viewport.set_mesh(None)
+        self.lbl_model.setText("No object (Grid only)")
+        self.lbl_status.setText("Grid-only mode active")
+        # Activate drawing grid if not already activated
+        if hasattr(self, 'chk_grid_canvas') and not self.chk_grid_canvas.isChecked():
+            self.chk_grid_canvas.setChecked(True)
+        if hasattr(self, 'chk_grid_viewport') and not self.chk_grid_viewport.isChecked():
+            self.chk_grid_viewport.setChecked(True)
+        if hasattr(self, 'chk_grid_ground') and not self.chk_grid_ground.isChecked():
+            self.chk_grid_ground.setChecked(True)
+        self._on_grid_changed()
+        self.viewport.update()
+        self._live_sync()
+        self._save_session()
 
     def _import(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1607,6 +1661,10 @@ class Krita3DLayerDocker(DockWidget):
         if "exceed_lines" in p:
             gs.exceed_lines = bool(p["exceed_lines"])
             self.chk_grid_exceed.blockSignals(True); self.chk_grid_exceed.setChecked(gs.exceed_lines); self.chk_grid_exceed.blockSignals(False)
+        if "fade_grid" in p or "grid_fade" in p:
+            gs.fade_grid = bool(p.get("grid_fade", p.get("fade_grid", True)))
+            if hasattr(self, 'chk_fade_grid'):
+                self.chk_fade_grid.blockSignals(True); self.chk_fade_grid.setChecked(gs.fade_grid); self.chk_fade_grid.blockSignals(False)
         if "vertical_lines" in p:
             gs.vertical_lines = bool(p["vertical_lines"])
             self.chk_grid_verticals.blockSignals(True); self.chk_grid_verticals.setChecked(gs.vertical_lines); self.chk_grid_verticals.blockSignals(False)
@@ -1672,6 +1730,7 @@ class Krita3DLayerDocker(DockWidget):
             "tile_size": gs.tile_size,
             "subdivisions": gs.subdivisions,
             "exceed_lines": gs.exceed_lines,
+            "grid_fade": getattr(gs, 'fade_grid', True),
             "vertical_lines": gs.vertical_lines,
             "vertical_height": getattr(gs, 'vertical_height', 2.0),
             "axis_colors": gs.axis_colors,
@@ -1849,6 +1908,8 @@ class Krita3DLayerDocker(DockWidget):
         gs.tile_size = self.spin_grid_tile.value()
         gs.subdivisions = self.spin_grid_subdiv.value()
         gs.exceed_lines = self.chk_grid_exceed.isChecked()
+        if hasattr(self, 'chk_fade_grid'):
+            gs.fade_grid = self.chk_fade_grid.isChecked()
         gs.vertical_lines = self.chk_grid_verticals.isChecked()
         gs.axis_colors = self.chk_grid_axis.isChecked()
         self.viewport.update()
@@ -2329,6 +2390,7 @@ class Krita3DLayerDocker(DockWidget):
             "grid_tile":            float(gs.tile_size),
             "grid_subdiv":          int(gs.subdivisions),
             "grid_exceed":          bool(gs.exceed_lines),
+            "grid_fade":            bool(getattr(gs, "fade_grid", True)),
             "grid_verticals":       bool(gs.vertical_lines),
             "grid_vert_h":          float(gs.vertical_height),
             "grid_axis_col":        bool(gs.axis_colors),
@@ -2620,6 +2682,7 @@ class Krita3DLayerDocker(DockWidget):
             gs.tile_size = float(data.get("grid_tile", 0.5))
             gs.subdivisions = int(data.get("grid_subdiv", 1))
             gs.exceed_lines = bool(data.get("grid_exceed", True))
+            gs.fade_grid = bool(data.get("grid_fade", True))
             gs.vertical_lines = bool(data.get("grid_verticals", True))
             gs.vertical_height = float(data.get("grid_vert_h", 2.5))
             gs.axis_colors = bool(data.get("grid_axis_col", True))
@@ -2666,6 +2729,14 @@ class Krita3DLayerDocker(DockWidget):
                 self.chk_grid_exceed.blockSignals(True)
                 self.chk_grid_exceed.setChecked(gs.exceed_lines)
                 self.chk_grid_exceed.blockSignals(False)
+            if hasattr(self, "chk_fade_grid"):
+                self.chk_fade_grid.blockSignals(True)
+                self.chk_fade_grid.setChecked(gs.fade_grid)
+                self.chk_fade_grid.blockSignals(False)
+            if hasattr(self, "chk_verticals"):
+                self.chk_verticals.blockSignals(True)
+                self.chk_verticals.setChecked(gs.vertical_lines)
+                self.chk_verticals.blockSignals(False)
             if hasattr(self, "chk_grid_verticals"):
                 self.chk_grid_verticals.blockSignals(True)
                 self.chk_grid_verticals.setChecked(gs.vertical_lines)

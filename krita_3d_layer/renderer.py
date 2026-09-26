@@ -212,6 +212,7 @@ class PerspectiveGridSettings:
         self.grid_width = 1.0
         self.grid_opacity = 0.85
         self.axis_colors = True
+        self.fade_grid = True
 
 
 class Camera3D:
@@ -550,58 +551,111 @@ class Renderer3D:
                 render_size, offset_x, offset_y, aspect=1.0)
             return pt
 
+        fade_active = bool(getattr(settings, 'fade_grid', True))
+
         def clip_segment_near_plane(p1, p2, near_z=0.03):
             c1 = view_mat * QVector4D(p1[0], p1[1], p1[2], 1.0)
             c2 = view_mat * QVector4D(p2[0], p2[1], p2[2], 1.0)
             z1 = -c1.z()
             z2 = -c2.z()
             if z1 < near_z and z2 < near_z:
-                return None, None
+                return None, None, 0.0, 0.0
             v1 = QVector3D(*p1)
             v2 = QVector3D(*p2)
             if z1 < near_z:
                 denom = (z2 - z1)
                 t = (near_z - z1) / denom if abs(denom) > 1e-6 else 0.0
                 v1 = v1 * (1.0 - t) + v2 * t
+                z1 = near_z
             elif z2 < near_z:
                 denom = (z1 - z2)
                 t = (near_z - z2) / denom if abs(denom) > 1e-6 else 0.0
                 v2 = v2 * (1.0 - t) + v1 * t
-            return (v1.x(), v1.y(), v1.z()), (v2.x(), v2.y(), v2.z())
+                z2 = near_z
+            return (v1.x(), v1.y(), v1.z()), (v2.x(), v2.y(), v2.z()), z1, z2
+
+        # Compute dynamic horizon fade distances
+        step_base = settings.tile_size
+        grid_ext_count = max(16, settings.grid_extent)
+        base_extent = grid_ext_count * step_base
+        fade_start = base_extent * 0.35
+        fade_end   = base_extent * 2.8 if settings.exceed_lines else base_extent * 1.2
+
+        def get_depth_alpha(z):
+            if not fade_active or z <= fade_start:
+                return 1.0
+            if z >= fade_end:
+                return 0.0
+            t = (z - fade_start) / (fade_end - fade_start)
+            return max(0.0, min(1.0, 0.5 * (1.0 + math.cos(math.pi * t))))
 
         def draw_3d_segment(p1_3d, p2_3d, pen):
-            cp1, cp2 = clip_segment_near_plane(p1_3d, p2_3d, near_z=0.03)
+            cp1, cp2, z1, z2 = clip_segment_near_plane(p1_3d, p2_3d, near_z=0.03)
             if not cp1 or not cp2:
+                return
+
+            a1 = get_depth_alpha(z1)
+            a2 = get_depth_alpha(z2)
+            if fade_active and a1 <= 0.005 and a2 <= 0.005:
                 return
 
             if is_curvilinear:
                 v1 = QVector3D(*cp1)
                 v2 = QVector3D(*cp2)
                 seg_len = (v2 - v1).length()
-                # Adaptive step count for performance — fewer steps on short segments
                 steps = max(24, min(80, int(seg_len * 12)))
                 curr_seg = []
-                painter.setPen(pen)
                 for s in range(steps + 1):
                     t  = s / float(steps)
                     vm = v1 * (1.0 - t) + v2 * t
+                    zs = z1 * (1.0 - t) + z2 * t
+                    as_ = get_depth_alpha(zs)
+                    if as_ <= 0.005:
+                        continue
                     pt = project_3d_point(vm.x(), vm.y(), vm.z())
                     if pt is not None:
-                        curr_seg.append(pt)
+                        curr_seg.append((pt, as_))
                     else:
                         if len(curr_seg) >= 2:
                             for idx in range(len(curr_seg) - 1):
-                                painter.drawLine(curr_seg[idx], curr_seg[idx + 1])
+                                p_a = curr_seg[idx][0]
+                                p_b = curr_seg[idx + 1][0]
+                                a_mid = (curr_seg[idx][1] + curr_seg[idx + 1][1]) * 0.5
+                                step_pen = QPen(pen)
+                                c = step_pen.color()
+                                c.setAlpha(int(c.alpha() * a_mid))
+                                step_pen.setColor(c)
+                                painter.setPen(step_pen)
+                                painter.drawLine(p_a, p_b)
                         curr_seg = []
                 if len(curr_seg) >= 2:
                     for idx in range(len(curr_seg) - 1):
-                        painter.drawLine(curr_seg[idx], curr_seg[idx + 1])
+                        p_a = curr_seg[idx][0]
+                        p_b = curr_seg[idx + 1][0]
+                        a_mid = (curr_seg[idx][1] + curr_seg[idx + 1][1]) * 0.5
+                        step_pen = QPen(pen)
+                        c = step_pen.color()
+                        c.setAlpha(int(c.alpha() * a_mid))
+                        step_pen.setColor(c)
+                        painter.setPen(step_pen)
+                        painter.drawLine(p_a, p_b)
                 return
 
             pt1 = project_3d_point(*cp1)
             pt2 = project_3d_point(*cp2)
             if pt1 and pt2:
-                painter.setPen(pen)
+                if fade_active and (a1 < 0.99 or a2 < 0.99):
+                    grad = QLinearGradient(pt1, pt2)
+                    c1 = QColor(pen.color())
+                    c1.setAlpha(int(c1.alpha() * a1))
+                    c2 = QColor(pen.color())
+                    c2.setAlpha(int(c2.alpha() * a2))
+                    grad.setColorAt(0.0, c1)
+                    grad.setColorAt(1.0, c2)
+                    f_pen = QPen(QBrush(grad), pen.widthF(), pen.style(), pen.capStyle(), pen.joinStyle())
+                    painter.setPen(f_pen)
+                else:
+                    painter.setPen(pen)
                 painter.drawLine(pt1, pt2)
             elif pt1 or pt2:
                 v1 = QVector3D(*cp1)

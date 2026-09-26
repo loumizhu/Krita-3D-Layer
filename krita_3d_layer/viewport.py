@@ -593,7 +593,7 @@ class Viewport3D(QWidget):
             self.renderer.render_scene(
                 painter, self.mesh, self.camera, self.lighting,
                 self.render_style, w, h)
-        else:
+        elif not (self.grid_settings and (self.grid_settings.show_in_viewport or self.grid_settings.enabled)):
             painter.setPen(QColor(180, 190, 205))
             painter.setFont(QFont("Segoe UI", 9))
             painter.drawText(self.rect(), Qt.AlignCenter, "No 3D Model\n\nImport .obj / .glb / .stl")

@@ -355,6 +355,7 @@ class Renderer3D:
         self.contour_width = 0.0
         self.backface_culling          = True
         self.wireframe_backface_culling = True
+        self.hide_coplanar_edges       = True
         self.quality = "Balanced"
 
     def render_to_image(self, mesh, camera, lighting, style=RenderStyle.SHADED,
@@ -464,20 +465,42 @@ class Renderer3D:
                 poly = QPolygonF([screen_pts[face[0]], screen_pts[face[1]], screen_pts[face[2]]])
                 painter.drawPolygon(poly)
 
-        for _, face, f_color in visible_faces:
-            poly = QPolygonF([screen_pts[face[0]], screen_pts[face[1]], screen_pts[face[2]]])
-            if is_wire_only:
-                painter.setPen(QPen(self.wire_color, self.wire_width))
-                painter.setBrush(Qt.NoBrush)
-                painter.drawPolygon(poly)
-            elif is_shaded_wire:
-                painter.setPen(QPen(self.wire_color, self.wire_width))
-                painter.setBrush(QBrush(f_color))
-                painter.drawPolygon(poly)
-            else:
+        # Shaded surfaces pass (for non-wire styles)
+        if not is_wire_only and not is_shaded_wire:
+            for _, face, f_color in visible_faces:
+                poly = QPolygonF([screen_pts[face[0]], screen_pts[face[1]], screen_pts[face[2]]])
                 painter.setPen(QPen(f_color, 0.7))
                 painter.setBrush(QBrush(f_color))
                 painter.drawPolygon(poly)
+        elif is_shaded_wire:
+            # Draw shaded faces without wire stroke to eliminate internal cracks
+            for _, face, f_color in visible_faces:
+                poly = QPolygonF([screen_pts[face[0]], screen_pts[face[1]], screen_pts[face[2]]])
+                painter.setPen(QPen(f_color, 0.7))
+                painter.setBrush(QBrush(f_color))
+                painter.drawPolygon(poly)
+
+        # Wireframe edges pass (for Wireframe and Shaded + Wireframe)
+        if is_shaded_wire or is_wire_only:
+            wire_pen = QPen(self.wire_color, self.wire_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(wire_pen)
+            painter.setBrush(Qt.NoBrush)
+            coplanar = getattr(mesh, "coplanar_edges", set()) if self.hide_coplanar_edges else set()
+            drawn_edges = set()
+            for _, face, _ in visible_faces:
+                v0, v1, v2 = face[0], face[1], face[2]
+                for e in ((v0, v1) if v0 < v1 else (v1, v0),
+                          (v1, v2) if v1 < v2 else (v2, v1),
+                          (v2, v0) if v2 < v0 else (v0, v2)):
+                    if e in drawn_edges:
+                        continue
+                    drawn_edges.add(e)
+                    if self.hide_coplanar_edges and e in coplanar:
+                        continue
+                    pA = screen_pts[e[0]]
+                    pB = screen_pts[e[1]]
+                    if pA.x() > -9000 and pB.x() > -9000:
+                        painter.drawLine(pA, pB)
 
         # Circular fisheye vignette mask
         if proj_mode == ProjectionMode.FISHEYE and getattr(camera, 'fisheye_crop_circle', False):

@@ -24,6 +24,8 @@ class MeshData:
         self.bbox_max = QVector3D(0, 0, 0)
         self.radius = 1.0
         self.scale = 1.0
+        self.polygon_edges = None   # Optional set of (min_idx, max_idx) original polygon perimeter edges
+        self.coplanar_edges = set() # Set of (min_idx, max_idx) internal triangulation diagonals / coplanar edges
 
     @property
     def vertex_count(self):
@@ -99,6 +101,41 @@ class MeshData:
             else:
                 self.face_normals.append(QVector3D(0, 1, 0))
 
+    def compute_coplanar_edges(self, threshold_degrees=1.5):
+        """
+        Identify internal triangulation diagonals / coplanar edges.
+        If polygon_edges is defined (e.g. from OBJ quads/polygons), any edge
+        not in polygon_edges is an internal diagonal.
+        Otherwise (e.g. STL, GLB, triangulated OBJ), edges shared by two adjacent
+        faces whose dihedral angle is <= threshold_degrees are marked as coplanar diagonals.
+        """
+        self.coplanar_edges = set()
+        edge_to_faces = {}
+        for fi, face in enumerate(self.faces):
+            v0, v1, v2 = face[0], face[1], face[2]
+            for e in ((v0, v1) if v0 < v1 else (v1, v0),
+                      (v1, v2) if v1 < v2 else (v2, v1),
+                      (v2, v0) if v2 < v0 else (v0, v2)):
+                if e not in edge_to_faces:
+                    edge_to_faces[e] = [fi]
+                else:
+                    edge_to_faces[e].append(fi)
+
+        self.edge_to_faces = edge_to_faces
+        has_poly_edges = (self.polygon_edges is not None and len(self.polygon_edges) > 0)
+        cos_thresh = math.cos(math.radians(threshold_degrees))
+
+        for e, f_list in edge_to_faces.items():
+            if has_poly_edges:
+                if e not in self.polygon_edges:
+                    self.coplanar_edges.add(e)
+            elif len(f_list) == 2:
+                n1 = self.face_normals[f_list[0]]
+                n2 = self.face_normals[f_list[1]]
+                dot = n1.x() * n2.x() + n1.y() * n2.y() + n1.z() * n2.z()
+                if dot >= cos_thresh:
+                    self.coplanar_edges.add(e)
+
 
 def load_obj(filepath):
     """
@@ -112,6 +149,8 @@ def load_obj(filepath):
     raw_verts = []
     raw_normals = []
     faces = []
+    has_quads = False
+    orig_edges = set()
 
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
@@ -140,6 +179,14 @@ def load_obj(filepath):
                     v_idx = idx - 1 if idx > 0 else num_v + idx
                     poly_verts.append(v_idx)
                 
+                if len(poly_verts) >= 3:
+                    if len(poly_verts) > 3:
+                        has_quads = True
+                    for k in range(len(poly_verts)):
+                        u = poly_verts[k]
+                        v = poly_verts[(k + 1) % len(poly_verts)]
+                        orig_edges.add((u, v) if u < v else (v, u))
+
                 # Triangulate face using triangle fan
                 if len(poly_verts) == 3:
                     faces.append(tuple(poly_verts))
@@ -147,10 +194,13 @@ def load_obj(filepath):
                     for i in range(1, len(poly_verts) - 1):
                         faces.append((poly_verts[0], poly_verts[i], poly_verts[i+1]))
 
+    if has_quads:
+        mesh.polygon_edges = orig_edges
     mesh.vertices = raw_verts
     mesh.faces = faces
     mesh.compute_bounds_and_normalize()
     mesh.compute_face_normals()
+    mesh.compute_coplanar_edges()
     return mesh
 
 
@@ -218,6 +268,7 @@ def _load_stl_binary(filepath, mesh):
     mesh.faces = faces
     mesh.compute_bounds_and_normalize()
     mesh.compute_face_normals()
+    mesh.compute_coplanar_edges()
     return mesh
 
 
@@ -251,6 +302,7 @@ def _load_stl_ascii(filepath, mesh):
     mesh.faces = faces
     mesh.compute_bounds_and_normalize()
     mesh.compute_face_normals()
+    mesh.compute_coplanar_edges()
     return mesh
 
 
@@ -378,6 +430,7 @@ def _parse_gltf_structure(gltf, buffers_data, name):
     mesh.faces = all_faces
     mesh.compute_bounds_and_normalize()
     mesh.compute_face_normals()
+    mesh.compute_coplanar_edges()
     return mesh
 
 

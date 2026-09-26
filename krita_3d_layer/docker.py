@@ -624,13 +624,22 @@ class Krita3DLayerDocker(DockWidget):
         self.combo_style.setToolTip("Choose 3D artistic rendering style (Shaded + Wireframe, Shaded, Wireframe, Silhouette, Normal Map)")
         self.combo_style.currentTextChanged.connect(self._on_style)
         style_row.addWidget(self.combo_style, 1)
+        self.sec_model.add_layout(style_row)
 
+        # Wireframe options row (Cull Back & Quad Wireframe / Hide Diagonals)
+        wire_opts_row = QHBoxLayout(); wire_opts_row.setSpacing(4)
         self.chk_wire_cull = QCheckBox("Cull Back")
         self.chk_wire_cull.setChecked(True)
         self.chk_wire_cull.setToolTip("Hide back-facing wireframe edges for cleaner drawings")
         self.chk_wire_cull.stateChanged.connect(self._on_wire_cull)
-        style_row.addWidget(self.chk_wire_cull, 0)
-        self.sec_model.add_layout(style_row)
+        wire_opts_row.addWidget(self.chk_wire_cull, 0)
+
+        self.chk_hide_coplanar = QCheckBox("Quad Wire (Hide Diagonals)")
+        self.chk_hide_coplanar.setChecked(True)
+        self.chk_hide_coplanar.setToolTip("Hide internal triangulation diagonals on flat faces and quads (Blender quad-style wireframe)")
+        self.chk_hide_coplanar.stateChanged.connect(self._on_hide_coplanar)
+        wire_opts_row.addWidget(self.chk_hide_coplanar, 1)
+        self.sec_model.add_layout(wire_opts_row)
 
         # Wire thickness & Wire Color
         wr = QHBoxLayout(); wr.setSpacing(1)
@@ -1805,6 +1814,12 @@ class Krita3DLayerDocker(DockWidget):
         self._live_sync()
         self._schedule_save()
 
+    def _on_hide_coplanar(self, state):
+        self.viewport.renderer.hide_coplanar_edges = (state == Qt.Checked)
+        self.viewport.update()
+        self._live_sync()
+        self._schedule_save()
+
     def _on_wire_w(self, v):
         w = v / 10.0
         self.viewport.renderer.wire_width = w
@@ -2290,6 +2305,7 @@ class Krita3DLayerDocker(DockWidget):
             "render_style":         self.viewport.render_style,
             "base_color":           ren.base_color.name() if ren.base_color.isValid() else "#ecb613",
             "wire_cull":            bool(getattr(ren, "wireframe_backface_culling", True)),
+            "hide_coplanar":        bool(getattr(ren, "hide_coplanar_edges", True)),
             "wire_width":           float(ren.wire_width),
             "wire_color":           ren.wire_color.name() if hasattr(ren, "wire_color") and ren.wire_color.isValid() else "#1e293b",
             "contour_width":        float(ren.contour_width),
@@ -2529,6 +2545,13 @@ class Krita3DLayerDocker(DockWidget):
                 self.chk_wire_cull.blockSignals(True)
                 self.chk_wire_cull.setChecked(wcull)
                 self.chk_wire_cull.blockSignals(False)
+
+            hcop = bool(data.get("hide_coplanar", True))
+            ren.hide_coplanar_edges = hcop
+            if hasattr(self, "chk_hide_coplanar"):
+                self.chk_hide_coplanar.blockSignals(True)
+                self.chk_hide_coplanar.setChecked(hcop)
+                self.chk_hide_coplanar.blockSignals(False)
 
             ww = float(data.get("wire_width", 1.0))
             ren.wire_width = ww

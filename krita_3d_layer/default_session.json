@@ -22,6 +22,7 @@
   "render_style": "Shaded + Wireframe",
   "base_color": "#848ba2",
   "wire_cull": true,
+  "hide_coplanar": true,
   "wire_width": 1.0,
   "wire_color": "#1e293b",
   "contour_width": 0.0,

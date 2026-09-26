@@ -159,6 +159,13 @@ Interactive `QWidget` embedded in the docker. Handles all mouse interaction:
 | **Zoom (distance)** | Right-click drag / Ctrl+Left drag |
 | **FOV (focal length)** | Scroll wheel over viewport |
 | **Light direction** | Shift+Left or Shift+Right drag |
+| **Double-Click Frame** | Left double-click resets view and frames the 3D model |
+
+**Tiny Overlay Navigation Buttons** (upper right of viewport):
+- `⟳` **Orbit**: Click & drag to orbit camera yaw & pitch (single-click resets to 3/4 view)
+- `✥` **Pan**: Click & drag to pan camera screen-space X/Y (single-click resets pan)
+- `🔍` **Zoom**: Click & drag up/down to zoom camera distance (single-click frames object)
+- `↕` **Tilt**: Click & drag up/down to tilt camera pitch (single-click levels camera to 0°)
 
 **Camera Modes** (selectable via dropdown):
 - `Orbit Around Object` — standard turntable, model follows mouse
@@ -172,26 +179,34 @@ The viewport emits `camera_changed` and `interaction_ended` signals. The docker 
 ### `Krita3DLayerDocker` (docker.py)
 The main DockWidget. Sections (all collapsible):
 
-1. **3D VIEWPORT** — embedded Viewport3D + camera preset buttons
-2. **CANVAS SYNC** — Stamp button, Live Sync toggle (ON by default), layer mode dropdown
-3. **CAMERA** — Camera mode, Perspective/Ortho, FOV slider + lens presets, distance, roll, target XYZ coordinates, center-on-model
-4. **CLIPPING** — Near/Far clip plane sliders (collapsed by default)
+1. **3D VIEWPORT** — embedded Viewport3D with overlay navigation controls + double-click framing
+2. **MODEL** (just below Viewport) — Import button, quick-load Asaro Head, Center on Model, Origin, Frame View
+3. **CAMERA & TILT** (just below Model) — Tilt/Pitch slider + 0° level button, camera presets (Frt, 3/4, R, L, Top, Rst), Camera mode, Perspective/Ortho, FOV slider + lens presets, distance, roll, target XYZ coordinates
+4. **CANVAS SYNC & LIMITS** — Stamp button, Live Sync toggle, layer mode dropdown, 3D Scene Frame Limits (limit to canvas frame, set from selection, X/Y/W/H controls), Ground Perspective Matching ("Calibrate Ground Rectangle...")
 5. **STYLE** — Render style dropdown, wireframe backface culling toggle, wire/contour thickness+color, base color, transparent background
 6. **LIGHTING** — SphereLightWidget (interactive 3D sphere with directional arrow), Follow Camera toggle, Ambient/Key intensity sliders
-7. **MODEL** — Import button, quick-load Asaro Head (collapsed by default)
+7. **CLIPPING** — Near/Far clip plane sliders (collapsed by default)
 
 **Scripting API:**
 ```python
 d = Krita3DLayerDocker.instance()   # singleton accessor
 d.viewport.camera.fov = 85
 d.viewport.camera.yaw = 90
+d.viewport.camera.pitch = 20        # camera tilt
 d.viewport.renderer.wire_width = 2.5
 d.viewport.update()
 d._stamp()                          # force render to canvas
 ```
 
+### `GroundCalibratorDialog` & `solve_ground_rectangle` (ground_calibrator.py)
+Perspective matching tool that lets artists define a 4-point ground quadrilateral on the canvas snapshot.
+- Computes vanishing points $VP_1$ and $VP_2$ and the horizon line.
+- Solves camera Roll, Tilt (Pitch), Yaw, FOV, and distance.
+- Places the 3D model directly on top of the ground rectangle.
+
 ### `CanvasSyncManager` (canvas_sync.py)
-Static utility class. `render_to_krita_layer()` renders the full 3D scene at document resolution into a `QImage`, converts to ARGB32 byte buffer, and writes it to a Krita paint layer via `node.setPixelData()`.
+Static utility class. `render_to_krita_layer()` renders the 3D scene at document or frame resolution into a `QImage`, converts to ARGB32 byte buffer, and writes it to a Krita paint layer via `node.setPixelData()`.
+Supports `frame=(fx, fy, fw, fh)` to strictly limit rendering within canvas frame limits (nothing outside frame is drawn).
 
 Layer modes:
 - `"named"` — finds or creates a layer called `"3D Model Reference"` (default)
@@ -355,3 +370,76 @@ All properties are plain Python attributes — no getters/setters magic. Changes
 - Multiple mesh/object support
 - Animation keyframes for camera path
 - Transparent mesh sorting (order-independent transparency)
+
+---
+
+## 11. Recent Updates (September 2026)
+
+### 1. Scrubbable Numeric Spinboxes (`widgets.py`)
+- Created `ScrubbableSpinBox` (integer) and `ScrubbableDoubleSpinBox` (floating point).
+- Supports standard click-to-type input AND click-and-drag horizontal scrubbing (Blender-style).
+- Modifiers: `Shift` = 2x speed, `Ctrl` = 0.1x fine precision.
+- Integrated across all docker numeric fields (Target XYZ, Scene Frame X/Y/W/H, Perspective Grid parameters).
+
+### 2. Viewport Height Resize Handle (`widgets.py`)
+- Added `ViewportResizeHandle` underneath `Viewport3D`.
+- Provides a clean grip bar allowing users to dynamically slide and resize the viewport height directly inside the docker.
+
+### 3. Studio Grey Gradient & Ground Grid (`viewport.py`)
+- Replaced flat dark grey background with a smooth vertical linear gradient (`#484e58` to `#242830`) allowing both dark and light 3D models to stand out clearly.
+- Rendered real-time ground perspective grid in viewport background.
+
+### 4. 3D Perspective Grid System (`renderer.py` & `docker.py`)
+- Added `PerspectiveGridSettings` and a dedicated **3D PERSPECTIVE GRID** collapsible docker section.
+- Supports:
+  - Horizon eye-level line.
+  - Ground square tile grid (custom extent, tile size, subdivisions).
+  - Exceeding vanishing lines extending to perspective vanishing points.
+  - Vertical perspective height guide poles.
+  - Colored 3D axes (X: Red, Z: Blue, Y: Green).
+  - Drawing grid directly on Krita canvas layer even when NO 3D model is loaded ("Stamp Grid Only to Canvas").
+
+### 5. True Camera Lens Tilt vs Orbit Pitch (`renderer.py` & `viewport.py`)
+- Added `Camera3D.tilt` controlling the view matrix X-axis rotation (camera lens tilt).
+- Disentangled lens tilt from orbit pitch:
+  - Orbit Pitch: orbits camera up/down around look-at target.
+  - Lens Tilt: tilts camera head up/down without changing world position.
+  - Viewport overlay `↕` button and docker slider now control lens tilt directly.
+
+### 6. Compact Framing & Calibration Controls (`docker.py`)
+- Streamlined Ground Perspective section into a 3-button row:
+  - `[📐 Ground Rect...]` (opens 4-point ground perspective solver).
+  - `[🖥️ Full Canvas]` (resets limits to full canvas).
+  - `[✏️ Draw Frame]` (defines 3D scene frame from active selection or prompts rectangular selection).
+- Improved `📐 Ratio` button to physically resize the viewport height to match document aspect ratio with clear status readout.
+
+### 7. Silhouette Contour Fix (`renderer.py`)
+- Resolved back-face and interior edge contour bleed-through by using an inverted-hull dilated underlay pass beneath the front-face shaded polygons.
+
+### 8. Tight Object Framing & Center Model Bug Fixes (`viewport.py` & `docker.py`)
+- Fixed `frame_object()` to compute normalized vertex extents and use perspective projection math with only an 8% padding factor, tightly framing models.
+- Fixed `_center_on_model()` to center on normalized vertex bounds and reset pan offsets.
+
+### 9. 3D Primitives & Models Menu (`docker.py`)
+- Replaced the standalone Asaro button with a versatile `[ 📦 Primitives ▾ ]` dropdown menu button.
+- Automatically scans `krita_3d_layer/3D-Primitive` and lists all bundled primitives and models:
+  - `🗿 Asaro Head Planes`
+  - `📦 Perfect Box`
+  - `📦 Box - wireframe- primitive`
+  - `🥫 Cylinder`
+  - `⚽ Sphere`
+  - `🥚 ellipse`
+  - `🏁 plane grid`
+  - `📐 wireframe sphere (GLB)`
+  - `📐 wireframe sphere (OBJ)`
+  - `📂 Open Primitives Folder...` (opens directory in Explorer so users can add custom assets).
+- Automatically updates button label to the active model and auto-frames camera on load.
+
+### 10. Native GLB and glTF 2.0 Support (`mesh_loader.py`)
+- Added zero-dependency, pure-Python binary glTF (`.glb`) and text glTF (`.gltf`) parsers.
+- Reads glTF JSON, binary chunks (`BIN\0`), bufferViews, and accessors (scalar, vector, index arrays).
+- Supports indexed and non-indexed triangles, triangle strips, and triangle fans.
+- Handles base64 data URIs and external `.bin` files for `.gltf` scenes.
+- Expanded file dialog filter in `_import()` to include `.glb` and `.gltf`.
+
+

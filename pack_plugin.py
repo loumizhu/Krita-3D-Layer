@@ -49,8 +49,9 @@ def pack():
                 filepath = os.path.join(root, filename)
                 if should_exclude(filepath):
                     continue
-                # Only include Python files
-                if not filename.endswith(".py"):
+                # Include Python files, Manual HTML, JSON configs, and 3D model assets (.obj, .stl, .glb, .gltf)
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in ('.py', '.obj', '.stl', '.glb', '.gltf', '.html', '.json'):
                     continue
 
                 arcname = os.path.relpath(filepath, SOURCE_DIR)

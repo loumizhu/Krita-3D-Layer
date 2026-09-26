@@ -8,7 +8,7 @@ Includes:
 import math
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFrame, QSizePolicy
+    QFrame, QSizePolicy, QSpinBox, QDoubleSpinBox
 )
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QRadialGradient,
@@ -316,3 +316,141 @@ class SphereLightWidget(QWidget):
         painter.setFont(font)
         angle_str = f"{int(self.azimuth)}° | {int(self.elevation)}°"
         painter.drawText(0, int(h - 2), w, 12, Qt.AlignHCenter | Qt.AlignBottom, angle_str)
+
+
+class ScrubbableSpinBox(QSpinBox):
+    """
+    Numeric integer spinbox supporting click-to-type AND click-and-drag horizontal scrubbing.
+    Dragging horizontally increases/decreases the value.
+    Shift = 5x faster, Ctrl = 0.2x finer.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_start_pos = None
+        self._drag_start_val = 0
+        self._is_dragging = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+            self._drag_start_val = self.value()
+            self._is_dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_pos and (event.buttons() & Qt.LeftButton):
+            dx = event.pos().x() - self._drag_start_pos.x()
+            if not self._is_dragging and abs(dx) >= 3:
+                self._is_dragging = True
+            if self._is_dragging:
+                step = self.singleStep() or 1
+                factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
+                delta = int(dx * (step * 0.15 * factor))
+                new_val = min(self.maximum(), max(self.minimum(), self._drag_start_val + delta))
+                self.setValue(new_val)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._is_dragging:
+            self._is_dragging = False
+            self._drag_start_pos = None
+            event.accept()
+            return
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+
+class ScrubbableDoubleSpinBox(QDoubleSpinBox):
+    """
+    Double numeric spinbox supporting click-to-type AND click-and-drag horizontal scrubbing.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_start_pos = None
+        self._drag_start_val = 0.0
+        self._is_dragging = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+            self._drag_start_val = self.value()
+            self._is_dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_pos and (event.buttons() & Qt.LeftButton):
+            dx = event.pos().x() - self._drag_start_pos.x()
+            if not self._is_dragging and abs(dx) >= 3:
+                self._is_dragging = True
+            if self._is_dragging:
+                step = self.singleStep() or 0.1
+                factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
+                delta = dx * (step * 0.1 * factor)
+                new_val = min(self.maximum(), max(self.minimum(), self._drag_start_val + delta))
+                self.setValue(new_val)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._is_dragging:
+            self._is_dragging = False
+            self._drag_start_pos = None
+            event.accept()
+            return
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+
+class ViewportResizeHandle(QWidget):
+    """
+    Subtle horizontal splitter grip beneath the Viewport.
+    Dragging up/down resizes the viewport height dynamically.
+    """
+    resized = pyqtSignal(int)
+
+    def __init__(self, target_widget, min_h=60, max_h=800, parent=None):
+        super().__init__(parent)
+        self.target = target_widget
+        self.min_h = min_h
+        self.max_h = max_h
+        self.setFixedHeight(8)
+        self.setCursor(Qt.SplitVCursor)
+        self.setToolTip("Drag down/up to resize 3D viewport height")
+        self._drag_start_y = None
+        self._start_h = 0
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_y = event.globalPos().y()
+            self._start_h = self.target.height()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_y is not None:
+            dy = event.globalPos().y() - self._drag_start_y
+            new_h = max(self.min_h, min(self.max_h, self._start_h + dy))
+            self.target.setFixedHeight(new_h)
+            self.resized.emit(new_h)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_y = None
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        w = self.width()
+        grip_w = min(40, max(24, w // 4))
+        p.setBrush(QBrush(QColor(100, 116, 139, 180)))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect((w - grip_w) // 2, 2, grip_w, 3, 1.5, 1.5)
+        p.end()
+

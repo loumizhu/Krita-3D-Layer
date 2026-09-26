@@ -4,26 +4,41 @@ Imports 3D models (OBJ, STL), renders them in an interactive 3D viewport,
 and stamps/draws them directly onto Krita's canvas layers.
 """
 
+import sys
+
 try:
     from krita import Krita, DockWidgetFactory, DockWidgetFactoryBase
-    from .docker import Krita3DLayerDocker, DOCKER_ID
-    from .extension import Krita3DLayerExtension
-
-    # Initialize and register with Krita instance
-    app = Krita.instance()
-    if app:
-        # 1. Register Extension
-        extension = Krita3DLayerExtension(parent=app)
-        app.addExtension(extension)
-
-        # 2. Register DockWidget
-        app.addDockWidgetFactory(
-            DockWidgetFactory(
-                DOCKER_ID,
-                DockWidgetFactoryBase.DockRight,
-                Krita3DLayerDocker
-            )
-        )
 except ImportError:
-    # Running outside Krita (e.g. standalone test or installer)
-    pass
+    Krita = None
+
+if Krita is not None:
+    try:
+        from .docker import Krita3DLayerDocker, DOCKER_ID
+        from .extension import Krita3DLayerExtension
+
+        app = Krita.instance()
+        if app:
+            # 1. Register Extension
+            try:
+                extension = Krita3DLayerExtension(parent=app)
+                app.addExtension(extension)
+            except Exception as e:
+                print(f"[Krita-3D-Layer] Notice adding extension: {e}", file=sys.stderr)
+
+            # 2. Register DockWidget
+            try:
+                dock_pos = getattr(getattr(DockWidgetFactoryBase, 'DockPosition', DockWidgetFactoryBase), 'DockRight', 1)
+                app.addDockWidgetFactory(
+                    DockWidgetFactory(
+                        DOCKER_ID,
+                        dock_pos,
+                        Krita3DLayerDocker
+                    )
+                )
+                print(f"[Krita-3D-Layer] Registered DockWidgetFactory: {DOCKER_ID}", file=sys.stderr)
+            except Exception as e:
+                print(f"[Krita-3D-Layer] Error adding dock widget factory: {e}", file=sys.stderr)
+    except Exception as e:
+        import traceback
+        print(f"[Krita-3D-Layer] Error initializing plugin: {e}", file=sys.stderr)
+        traceback.print_exc()

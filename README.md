@@ -3,7 +3,7 @@
 **Drop 3D references right into your Krita canvas. No setup, no hassle.**
 
 Ever wished you could just plop a 3D model into Krita, spin it around, and paint over it? That's exactly what this plugin does. Load an OBJ or STL, orbit it, tweak the lighting, and stamp it directly onto a paint layer — all without leaving Krita.
-
+You can quickly have a perspective grid ready to draw.
 It ships with a built-in **Asaro Head** so you can start studying planes and values the second you install it.
 
 <!-- ![3D Layer Demo](media/demo_preview.png) -->
@@ -22,29 +22,34 @@ It ships with a built-in **Asaro Head** so you can start studying planes and val
 ## ✨ What You Get
 
 - **3D viewport right inside Krita** — orbit, pan, zoom, adjust FOV, all with your mouse
+- **Interactive Gizmo & Scrub Labels** — click 3D axis gizmo to snap views (X/Y/Z) or drag Y/P/D/F labels to scrub camera angles
+- **Sticky Viewport** — pin viewport to the top of the docker while scrolling parameters
+- **Advanced Perspective Modes** — Standard 3-Point, Fisheye / 5-Point Curvilinear, and Artist 5-Vanishing-Point arc modes
 - **Stamp to canvas** — renders the 3D view at full document resolution onto a Krita layer with transparency
 - **Live Sync** — move the camera, the canvas layer updates automatically when you release
 - **Multiple render styles** — Shaded Planes, Wireframe, Shaded + Wireframe, Silhouette Mask, Normal Map
 - **Studio lighting** — dual key + fill lights, draggable light direction sphere, follow-camera mode
-- **OBJ & STL support** — load any standard mesh. Quads, tris, binary/ASCII STL, all handled
-- **Camera presets** — Front, Side, 3/4, Top — one click each
-- **Perspective & Ortho** — switch projection modes, adjust FOV with scroll wheel or lens presets
+- **OBJ, STL & GLB/glTF support** — load standard 3D meshes and embedded GLB/glTF models
+- **Built-in 3D Primitives** — Asaro Head, primitive boxes, spheres, cylinders, ellipses, and ground grids included
+- **Full Session Persistence & Presets** — automatically preserves viewport size, camera state, and parameters across sessions
 - **Zero dependencies** — runs on Krita's built-in PyQt5. No pip, no DLLs, no GPU required
-- **100% Free** — free for all Krita artists, forever
+- **100% Free & Cross-Platform** — works identically on Windows, Linux, and macOS
 
 ---
 
 ## 📦 Installation
 
-### Option A — From the ZIP (Recommended & Easiest)
+### Option A — From the ZIP (Recommended & Easiest — All Platforms)
 
-1. Download **`krita_3d_layer.zip`** from the [Releases](https://github.com/loumizhu/Krita-3D-Layer/releases) section (or grab it directly from this repo).
+1. Download **`krita_3d_layer.zip`** from this repository or the Releases section.
 2. Launch Krita.
 3. In the top menu, go to **Tools → Scripts → Import Python Plugin from File...**
 4. Choose the downloaded `krita_3d_layer.zip`.
 5. Restart Krita.
-6. Make sure it's enabled: **Settings → Configure Krita → Python Plugin Manager → ✅ Krita 3D Layer**.
-7. Open the panel: **Settings → Dockers → 3D Layer & Viewport**.
+6. Enable the plugin under **Settings → Configure Krita → Python Plugin Manager → ✅ Krita 3D Layer**.
+7. Open the panel: **Settings → Dockers → 3D Layer**.
+
+> 💡 **Built-in Manual:** In **Settings → Configure Krita → Python Plugin Manager**, select **Krita 3D Layer** and click the **Manual** button to open the full illustrated user guide! You can also click the **❓ Manual** button directly in the docker toolbar.
 
 ### Option B — Manual Install (from source)
 
@@ -57,6 +62,25 @@ It ships with a built-in **Asaro Head** so you can start studying planes and val
    - **Linux:** `~/.local/share/krita/pykrita/`
    - **macOS:** `~/Library/Application Support/krita/pykrita/`
 3. Restart Krita and enable the plugin under **Settings → Configure Krita → Python Plugin Manager**.
+
+---
+
+## 🌍 Multi-Platform Compatibility
+
+**Krita 3D Layer is 100% Cross-Platform (Windows, Linux, and macOS).**
+- Built on standard Python 3 and PyQt5 bundled inside Krita on all platforms.
+- Completely self-contained software 3D rasterizer with zero native C++/Win32 dependencies, DLLs, or GPU requirements.
+- Works identically across Windows, Linux distributions, and macOS.
+
+---
+
+## 💾 Where Parameters & Presets Are Saved
+
+- **Custom Presets:** When you click **💾 Save...** in the Presets section, all camera angles (yaw, pitch, roll, tilt), FOV, projection mode, fisheye curvature, perspective grids, ceiling height, horizon, and studio lighting are saved to a standard JSON file:
+  - **Windows:** `%APPDATA%\krita\krita_3d_layer_presets.json`
+  - **Linux:** `~/.local/share/krita/krita_3d_layer_presets.json`
+  - **macOS:** `~/Library/Application Support/krita/krita_3d_layer_presets.json`
+- **Instant Automatic Loading:** Selecting any preset in the dropdown immediately loads and synchronizes all viewport parameters and canvas stamping.
 
 ---
 

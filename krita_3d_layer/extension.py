@@ -12,7 +12,7 @@ except ImportError:
     Extension = object
     Krita = None
 
-from .docker import Krita3DLayerDocker, DEFAULT_ASARO_PATH
+from .docker import Krita3DLayerDocker
 
 
 class Krita3DLayerDialog(QDialog):
@@ -47,9 +47,24 @@ class Krita3DLayerExtension(Extension):
         )
         action.triggered.connect(self.show_dialog)
 
+        manual_action = window.createAction(
+            "krita_3d_layer_manual",
+            "3D Layer Manual & Quick Guide...",
+            "tools/scripts"
+        )
+        manual_action.triggered.connect(self.show_manual)
+
     def show_dialog(self):
         if not self.dialog:
             self.dialog = Krita3DLayerDialog()
         self.dialog.show()
         self.dialog.raise_()
         self.dialog.activateWindow()
+
+    def show_manual(self):
+        import os
+        from PyQt5.QtGui import QDesktopServices
+        from PyQt5.QtCore import QUrl
+        manual_path = os.path.join(os.path.dirname(__file__), "Manual.html")
+        if os.path.exists(manual_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(manual_path))

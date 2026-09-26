@@ -14,11 +14,19 @@ SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 PACKAGE_SRC = os.path.join(SOURCE_DIR, "krita_3d_layer")
 DESKTOP_SRC = os.path.join(SOURCE_DIR, "krita_3d_layer.desktop")
 
-PYKRITA_DIR = os.path.expandvars(r"%APPDATA%\krita\pykrita")
-KRITARC_PATH = os.path.expandvars(r"%LOCALAPPDATA%\kritarc")
+if sys.platform == "win32":
+    PYKRITA_DIR = os.path.expandvars(r"%APPDATA%\krita\pykrita")
+    KRITARC_PATH = os.path.expandvars(r"%LOCALAPPDATA%\kritarc")
+elif sys.platform == "darwin":
+    PYKRITA_DIR = os.path.expanduser("~/Library/Application Support/krita/pykrita")
+    KRITARC_PATH = os.path.expanduser("~/Library/Preferences/kritarc")
+else:  # Linux / Unix
+    PYKRITA_DIR = os.path.expanduser("~/.local/share/krita/pykrita")
+    KRITARC_PATH = os.path.expanduser("~/.config/kritarc")
 
 PACKAGE_DEST = os.path.join(PYKRITA_DIR, "krita_3d_layer")
 DESKTOP_DEST = os.path.join(PYKRITA_DIR, "krita_3d_layer.desktop")
+
 
 
 def install_files():
@@ -95,9 +103,10 @@ def enable_in_kritarc():
 
 
 def inject_into_running_krita():
+    import tempfile
     print("[3/3] Injecting plugin into running Krita instance...")
     # Generate live bootstrap script
-    bridge_script = os.path.expandvars(r"%TEMP%\krita_3d_layer_live_boot.py")
+    bridge_script = os.path.join(tempfile.gettempdir(), "krita_3d_layer_live_boot.py")
     boot_code = f"""
 import sys, os
 source_dir = r"{SOURCE_DIR}"
@@ -122,6 +131,8 @@ try:
     importlib.reload(krita_3d_layer.mesh_loader)
     import krita_3d_layer.renderer
     importlib.reload(krita_3d_layer.renderer)
+    import krita_3d_layer.ground_calibrator
+    importlib.reload(krita_3d_layer.ground_calibrator)
     import krita_3d_layer.canvas_sync
     importlib.reload(krita_3d_layer.canvas_sync)
     print("[Krita-3D-Layer] Reloaded modules successfully.")
@@ -140,8 +151,62 @@ app.addDockWidgetFactory(
         Krita3DLayerDocker
     )
 )
+
+# Show docker directly in the active main window
+try:
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QDockWidget, QAction, QMenu, QMenuBar
+    qwin = app.activeWindow().qwindow() if app.activeWindow() else None
+    if qwin:
+        existing_dock = None
+        for d in qwin.findChildren(QDockWidget):
+            if d.objectName() == DOCKER_ID or "3d layer" in (d.windowTitle() or "").lower():
+                existing_dock = d
+                break
+        if not existing_dock:
+            existing_dock = Krita3DLayerDocker()
+            qwin.addDockWidget(Qt.RightDockWidgetArea, existing_dock)
+
+        existing_dock.show()
+        existing_dock.raise_()
+        existing_dock.setVisible(True)
+
+        # Add toggle action to Settings -> Dockers menu
+        dock_act = existing_dock.toggleViewAction()
+        dock_act.setText("3D Layer")
+        dock_act.setChecked(True)
+
+        dockers_menu = None
+        for m in qwin.findChildren(QMenu):
+            t = (m.title() or "").replace("&", "").strip().lower()
+            if t == "dockers" or t == "docker":
+                dockers_menu = m
+                break
+        if not dockers_menu:
+            for mb in qwin.findChildren(QMenuBar):
+                for act in mb.actions():
+                    if "setting" in (act.text() or "").lower():
+                        sm = act.menu()
+                        if sm:
+                            for sa in sm.actions():
+                                if "docker" in (sa.text() or "").lower():
+                                    dockers_menu = sa.menu()
+                                    break
+        if dockers_menu:
+            already_in = False
+            for act in dockers_menu.actions():
+                if act.text() == "3D Layer" or act == dock_act:
+                    already_in = True
+                    act.setChecked(True)
+                    break
+            if not already_in:
+                dockers_menu.addAction(dock_act)
+except Exception as e:
+    print(f"[Krita-3D-Layer] Docker display notice: {{e}}")
+
 print("[Krita-3D-Layer] Live registration complete! Docker ID:", DOCKER_ID)
-with open(os.path.expandvars(r"%TEMP%\\krita_3d_boot_status.txt"), "w") as f:
+status_file = os.path.join(tempfile.gettempdir(), "krita_3d_boot_status.txt")
+with open(status_file, "w") as f:
     f.write("OK")
 """
     with open(bridge_script, "w", encoding="utf-8") as f:

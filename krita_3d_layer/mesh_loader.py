@@ -6,6 +6,8 @@ Zero external dependencies, utilizes PyQt5.QtGui.QVector3D.
 import os
 import math
 import struct
+import json
+import base64
 from PyQt5.QtGui import QVector3D
 
 
@@ -70,6 +72,17 @@ class MeshData:
                       (v.z() - cz) * norm_factor)
             for v in self.vertices
         ]
+
+        # Recompute bounding box and center in normalized coordinates
+        min_x = min(v.x() for v in self.vertices)
+        max_x = max(v.x() for v in self.vertices)
+        min_y = min(v.y() for v in self.vertices)
+        max_y = max(v.y() for v in self.vertices)
+        min_z = min(v.z() for v in self.vertices)
+        max_z = max(v.z() for v in self.vertices)
+        self.bbox_min = QVector3D(min_x, min_y, min_z)
+        self.bbox_max = QVector3D(max_x, max_y, max_z)
+        self.center = QVector3D((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, (min_z + max_z) * 0.5)
 
     def compute_face_normals(self):
         self.face_normals = []
@@ -241,14 +254,220 @@ def _load_stl_ascii(filepath, mesh):
     return mesh
 
 
+GLTF_COMPONENT_TYPES = {
+    5120: ('b', 1),  # BYTE
+    5121: ('B', 1),  # UNSIGNED_BYTE
+    5122: ('h', 2),  # SHORT
+    5123: ('H', 2),  # UNSIGNED_SHORT
+    5125: ('I', 4),  # UNSIGNED_INT
+    5126: ('f', 4)   # FLOAT
+}
+
+GLTF_TYPE_COUNTS = {
+    'SCALAR': 1,
+    'VEC2': 2,
+    'VEC3': 3,
+    'VEC4': 4,
+    'MAT4': 16
+}
+
+
+def _read_gltf_accessor(gltf, acc_idx, buffers_data):
+    accessors = gltf.get('accessors', [])
+    if acc_idx < 0 or acc_idx >= len(accessors):
+        return []
+    acc = accessors[acc_idx]
+    if 'bufferView' not in acc:
+        return []
+
+    buffer_views = gltf.get('bufferViews', [])
+    bv_idx = acc['bufferView']
+    if bv_idx >= len(buffer_views):
+        return []
+    bv = buffer_views[bv_idx]
+
+    buf_idx = bv.get('buffer', 0)
+    if buf_idx >= len(buffers_data):
+        return []
+    buffer_bytes = buffers_data[buf_idx]
+
+    comp_type, comp_size = GLTF_COMPONENT_TYPES.get(acc.get('componentType', 5126), ('f', 4))
+    num_comps = GLTF_TYPE_COUNTS.get(acc.get('type', 'SCALAR'), 1)
+    count = acc.get('count', 0)
+
+    start = bv.get('byteOffset', 0) + acc.get('byteOffset', 0)
+    stride = bv.get('byteStride', comp_size * num_comps)
+    item_format = '<' + comp_type * num_comps
+    item_size = comp_size * num_comps
+
+    res = []
+    for i in range(count):
+        offset = start + i * stride
+        if offset + item_size > len(buffer_bytes):
+            break
+        vals = struct.unpack_from(item_format, buffer_bytes, offset)
+        if num_comps == 1:
+            res.append(vals[0])
+        elif num_comps == 3:
+            res.append(QVector3D(float(vals[0]), float(vals[1]), float(vals[2])))
+        else:
+            res.append(vals)
+    return res
+
+
+def _parse_gltf_structure(gltf, buffers_data, name):
+    mesh = MeshData(name=name)
+    all_vertices = []
+    all_faces = []
+
+    for m in gltf.get('meshes', []):
+        for prim in m.get('primitives', []):
+            attrs = prim.get('attributes', {})
+            if 'POSITION' not in attrs:
+                continue
+
+            pos_idx = attrs['POSITION']
+            positions = _read_gltf_accessor(gltf, pos_idx, buffers_data)
+            if not positions:
+                continue
+
+            base_idx = len(all_vertices)
+            all_vertices.extend(positions)
+            mode = prim.get('mode', 4)  # 4 = TRIANGLES
+
+            if 'indices' in prim:
+                indices = _read_gltf_accessor(gltf, prim['indices'], buffers_data)
+                if mode == 4:  # TRIANGLES
+                    for i in range(0, len(indices) - 2, 3):
+                        all_faces.append((
+                            base_idx + int(indices[i]),
+                            base_idx + int(indices[i + 1]),
+                            base_idx + int(indices[i + 2])
+                        ))
+                elif mode == 5:  # TRIANGLE_STRIP
+                    for i in range(len(indices) - 2):
+                        if i % 2 == 0:
+                            all_faces.append((
+                                base_idx + int(indices[i]),
+                                base_idx + int(indices[i + 1]),
+                                base_idx + int(indices[i + 2])
+                            ))
+                        else:
+                            all_faces.append((
+                                base_idx + int(indices[i + 1]),
+                                base_idx + int(indices[i]),
+                                base_idx + int(indices[i + 2])
+                            ))
+                elif mode == 6:  # TRIANGLE_FAN
+                    for i in range(1, len(indices) - 1):
+                        all_faces.append((
+                            base_idx + int(indices[0]),
+                            base_idx + int(indices[i]),
+                            base_idx + int(indices[i + 1])
+                        ))
+            else:
+                # Non-indexed
+                if mode == 4:  # TRIANGLES
+                    for i in range(0, len(positions) - 2, 3):
+                        all_faces.append((base_idx + i, base_idx + i + 1, base_idx + i + 2))
+
+    if not all_vertices or not all_faces:
+        raise ValueError(f"No valid triangle geometry found in glTF / GLB: {name}")
+
+    mesh.vertices = all_vertices
+    mesh.faces = all_faces
+    mesh.compute_bounds_and_normalize()
+    mesh.compute_face_normals()
+    return mesh
+
+
+def load_glb(filepath):
+    """
+    Parse a binary glTF 2.0 (.glb) file.
+    Reads header, JSON chunk, binary buffer chunk, and extracts all mesh geometry.
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"GLB file not found: {filepath}")
+
+    with open(filepath, 'rb') as f:
+        header = f.read(12)
+        if len(header) < 12:
+            raise ValueError(f"Invalid GLB file: file too short ({filepath})")
+        magic, version, total_length = struct.unpack('<4sII', header)
+        if magic != b'glTF':
+            raise ValueError(f"Invalid GLB magic header: {magic}, expected b'glTF'")
+
+        # Chunk 0: JSON
+        c0_hdr = f.read(8)
+        if len(c0_hdr) < 8:
+            raise ValueError("Corrupt GLB: missing JSON chunk header.")
+        c0_len, c0_type = struct.unpack('<II', c0_hdr)
+        if c0_type != 0x4E4F534A:  # 'JSON'
+            raise ValueError("Corrupt GLB: first chunk must be JSON.")
+        json_data = f.read(c0_len).decode('utf-8', errors='ignore')
+        gltf = json.loads(json_data)
+
+        # Chunk 1: BIN (if present)
+        bin_data = b''
+        c1_hdr = f.read(8)
+        if len(c1_hdr) == 8:
+            c1_len, c1_type = struct.unpack('<II', c1_hdr)
+            bin_data = f.read(c1_len)
+
+    name = os.path.splitext(os.path.basename(filepath))[0]
+    return _parse_gltf_structure(gltf, [bin_data], name)
+
+
+def load_gltf(filepath):
+    """
+    Parse a text glTF 2.0 (.gltf) file.
+    Loads JSON, resolves buffers (embedded base64 or external .bin files), and extracts geometry.
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"glTF file not found: {filepath}")
+
+    base_dir = os.path.dirname(filepath)
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        gltf = json.load(f)
+
+    # Resolve all buffers
+    buffers_data = []
+    for buf in gltf.get('buffers', []):
+        uri = buf.get('uri', '')
+        if not uri:
+            buffers_data.append(b'')
+        elif uri.startswith('data:'):
+            # Embedded base64
+            parts = uri.split('base64,')
+            if len(parts) > 1:
+                buffers_data.append(base64.b64decode(parts[1]))
+            else:
+                buffers_data.append(b'')
+        else:
+            # External .bin file
+            bin_path = os.path.join(base_dir, uri)
+            if os.path.exists(bin_path):
+                with open(bin_path, 'rb') as bf:
+                    buffers_data.append(bf.read())
+            else:
+                buffers_data.append(b'')
+
+    name = os.path.splitext(os.path.basename(filepath))[0]
+    return _parse_gltf_structure(gltf, buffers_data, name)
+
+
 def load_3d_file(filepath):
     """
-    Main loader entrypoint supporting OBJ and STL files.
+    Main loader entrypoint supporting OBJ, STL, GLB, and glTF files.
     """
     ext = os.path.splitext(filepath)[1].lower()
     if ext == '.obj':
         return load_obj(filepath)
     elif ext == '.stl':
         return load_stl(filepath)
+    elif ext == '.glb':
+        return load_glb(filepath)
+    elif ext in ('.gltf',):
+        return load_gltf(filepath)
     else:
-        raise ValueError(f"Unsupported 3D file format: {ext}. Supported formats are: .obj, .stl")
+        raise ValueError(f"Unsupported 3D file format: '{ext}'. Supported formats are: .obj, .stl, .glb, .gltf")

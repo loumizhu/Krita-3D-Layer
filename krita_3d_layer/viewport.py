@@ -397,12 +397,24 @@ class Viewport3D(QWidget):
             self.update()
             return
 
-        # 2. Middle Click OR Alt + Left Click: Pan
+        # 2. Middle Click OR Alt + Left Click: Pan / Strafe
         if self.drag_button == Qt.MiddleButton or \
            (self.drag_button == Qt.LeftButton and (mods & Qt.AltModifier)):
-            pan_speed = 0.0025 * self.camera.distance
-            self.camera.pan_x -= dx * pan_speed * pan_mult
-            self.camera.pan_y += dy * pan_speed * pan_mult
+            if self.camera_mode == CAMERA_MODE_FIRST_PERSON:
+                # First Person: Strafe camera in its local view plane
+                rad_yaw = math.radians(self.camera.yaw)
+                rx = math.cos(rad_yaw)
+                rz = -math.sin(rad_yaw)
+                speed = 0.0025 * max(0.5, self.camera.distance) * pan_mult
+                mx = dx * speed
+                my = dy * speed
+                self.camera.target_x -= rx * mx
+                self.camera.target_z -= rz * mx
+                self.camera.target_y += my
+            else:
+                pan_speed = 0.0025 * self.camera.distance
+                self.camera.pan_x -= dx * pan_speed * pan_mult
+                self.camera.pan_y += dy * pan_speed * pan_mult
             self.camera_changed.emit()
             self.update()
             return
@@ -416,17 +428,42 @@ class Viewport3D(QWidget):
             self.update()
             return
 
-        # 4. Left Click: Camera rotation
+        # 4. Left Click: Camera rotation / Look
         if self.drag_button == Qt.LeftButton:
             orbit_speed = 0.55
             if self.camera_mode == CAMERA_MODE_FIRST_PERSON:
-                self.camera.yaw   = (self.camera.yaw   - dx * orbit_speed * orbit_yaw_mult) % 360.0
-                self.camera.pitch = max(-89.9, min(89.9, self.camera.pitch - dy * orbit_speed * orbit_pitch_mult))
-            elif self.camera_mode == CAMERA_MODE_TURNTABLE:
-                self.camera.roll  = 0.0
+                # First Person (Look Around):
+                # The camera eye position in world space stays stationary.
+                # Mouse dragging pans the camera's gaze direction from that exact viewpoint.
+                rad_yaw = math.radians(self.camera.yaw)
+                rad_pitch = math.radians(self.camera.pitch)
+                cur_eye = QVector3D(
+                    self.camera.distance * math.cos(rad_pitch) * math.sin(rad_yaw) + self.camera.target_x,
+                    self.camera.distance * math.sin(rad_pitch) + self.camera.target_y,
+                    self.camera.distance * math.cos(rad_pitch) * math.cos(rad_yaw) + self.camera.target_z
+                )
                 self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
-                self.camera.pitch = max(-89.9, min(89.9, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
-            else:  # Orbit
+                self.camera.pitch = max(-89.0, min(89.0, self.camera.pitch - dy * orbit_speed * orbit_pitch_mult))
+
+                new_rad_yaw = math.radians(self.camera.yaw)
+                new_rad_pitch = math.radians(self.camera.pitch)
+                new_offset = QVector3D(
+                    self.camera.distance * math.cos(new_rad_pitch) * math.sin(new_rad_yaw),
+                    self.camera.distance * math.sin(new_rad_pitch),
+                    self.camera.distance * math.cos(new_rad_pitch) * math.cos(new_rad_yaw)
+                )
+                new_target = cur_eye - new_offset
+                self.camera.target_x = new_target.x()
+                self.camera.target_y = new_target.y()
+                self.camera.target_z = new_target.z()
+            elif self.camera_mode == CAMERA_MODE_TURNTABLE:
+                # Turntable (Locked Up):
+                # Locked to horizontal plane (no roll or lens tilt) with pure vertical pitch limits
+                self.camera.roll  = 0.0
+                self.camera.tilt  = 0.0
+                self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
+                self.camera.pitch = max(-85.0, min(85.0, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
+            else:  # Orbit Around Object
                 self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
                 self.camera.pitch = max(-89.9, min(89.9, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
             self.camera_changed.emit()
@@ -484,15 +521,27 @@ class Viewport3D(QWidget):
         super().leaveEvent(event)
 
     def wheelEvent(self, event):
-        """Scroll wheel → zoom (faster, 3× speed)."""
+        """Scroll wheel → zoom or walk forward/backward in First Person."""
         event.accept()
         angle = event.angleDelta().y()
         if angle == 0:
             return
-        # Faster zoom: use distance scaling for natural feel
-        zoom_factor = 0.12 if angle > 0 else -0.12
-        self.camera.distance = max(0.01, min(50.0, self.camera.distance * (1.0 - zoom_factor)))
-        self.fov_changed.emit(self.camera.fov)
+        if self.camera_mode == CAMERA_MODE_FIRST_PERSON:
+            # Walk forward / backward along look direction in First Person mode
+            rad_yaw = math.radians(self.camera.yaw)
+            rad_pitch = math.radians(self.camera.pitch)
+            look_x = -math.cos(rad_pitch) * math.sin(rad_yaw)
+            look_y = -math.sin(rad_pitch)
+            look_z = -math.cos(rad_pitch) * math.cos(rad_yaw)
+            step = (0.25 if angle > 0 else -0.25) * max(0.4, self.camera.distance * 0.15)
+            self.camera.target_x += look_x * step
+            self.camera.target_y += look_y * step
+            self.camera.target_z += look_z * step
+        else:
+            # Faster zoom: use distance scaling for natural feel
+            zoom_factor = 0.12 if angle > 0 else -0.12
+            self.camera.distance = max(0.01, min(50.0, self.camera.distance * (1.0 - zoom_factor)))
+            self.fov_changed.emit(self.camera.fov)
         self.camera_changed.emit()
         self.interaction_ended.emit()
         self.update()

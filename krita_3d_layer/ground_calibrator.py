@@ -8,7 +8,7 @@ and places the 3D model directly on top of that ground rectangle with live previ
 import math
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSizePolicy, QFrame
+    QLabel, QSizePolicy, QFrame, QCheckBox
 )
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QPolygonF, QImage, QCursor,
@@ -39,7 +39,8 @@ def line_intersection(l1, l2):
     return QPointF(x, y)
 
 
-def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh=None, frame_rect=None):
+def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh=None, frame_rect=None,
+                           keep_horizon=True, flip_yaw=False):
     """
     Solves camera parameters from 4 ground quad points (p0..p3) in document pixel space:
       p0: Front-Left
@@ -139,6 +140,8 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
 
     roll = -math.degrees(math.atan2(N.x(), N.y()))
     roll = max(-89.0, min(89.0, roll))
+    if keep_horizon:
+        roll = 0.0
 
     # 8. Yaw (azimuth rotation around world up)
     # Project ray_X onto horizontal basis perpendicular to N
@@ -148,7 +151,10 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
 
     x_prime = QVector3D.dotProduct(ray_X, h_X)
     z_prime = QVector3D.dotProduct(ray_X, h_Z)
-    yaw = (180.0 + math.degrees(math.atan2(z_prime, -x_prime))) % 360.0
+    # Correct orientation so the front of the model faces forward towards the viewer
+    yaw = (math.degrees(math.atan2(z_prime, -x_prime))) % 360.0
+    if flip_yaw:
+        yaw = (yaw + 180.0) % 360.0
 
     # 9. Model Ground Alignment & Scale
     ground_y = -1.0
@@ -181,7 +187,18 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
 
     # 12. Horizon line
     horizon = None
-    if vp1 and vp2:
+    if keep_horizon:
+        # Strictly horizontal horizon line
+        if vp1 and vp2:
+            avg_y = (vp1.y() + vp2.y()) * 0.5
+        elif vp2:
+            avg_y = vp2.y()
+        elif vp1:
+            avg_y = vp1.y()
+        else:
+            avg_y = cy - f * math.tan(math.radians(pitch))
+        horizon = (0.0, 1.0, -avg_y)
+    elif vp1 and vp2:
         horizon = line_equation(vp1, vp2)
     elif vp2:
         horizon = (0.0, 1.0, -vp2.y())
@@ -234,6 +251,9 @@ class GroundCalibratorWidget(QWidget):
         self.hovered_handle = None
         self.is_picking_mode = False
         self.picked_points = []
+        self.keep_horizon = True
+        self.flip_yaw = False
+        self.current_cursor_pos = None
 
         # Current image rect within widget (for letterbox/aspect mapping)
         self.img_rect = QRectF(0, 0, 480, 360)
@@ -249,6 +269,16 @@ class GroundCalibratorWidget(QWidget):
 
         self.last_solution = {}
         self._recalculate()
+
+    def set_keep_horizon(self, val):
+        self.keep_horizon = bool(val)
+        self._recalculate()
+        self.update()
+
+    def toggle_flip_yaw(self):
+        self.flip_yaw = not self.flip_yaw
+        self._recalculate()
+        self.update()
 
     def set_canvas_image(self, qimg):
         self.bg_image = qimg
@@ -346,15 +376,27 @@ class GroundCalibratorWidget(QWidget):
             doc_w, doc_h,
             current_fov=cur_fov,
             mesh=self.mesh,
-            frame_rect=self.frame_rect
+            frame_rect=self.frame_rect,
+            keep_horizon=self.keep_horizon,
+            flip_yaw=self.flip_yaw
         )
         self.solution_changed.emit(self.last_solution)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.is_picking_mode:
+            self.is_picking_mode = False
+            self.picked_points = []
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             pos = event.pos()
 
-            # Sequential 4-point picking mode
+            # Sequential 4-point picking mode (Draw 4 points)
             if self.is_picking_mode:
                 norm_pt = self._widget_to_doc_norm(pos)
                 self.picked_points.append(norm_pt)
@@ -380,6 +422,12 @@ class GroundCalibratorWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.pos()
+        self.current_cursor_pos = pos
+
+        if self.is_picking_mode:
+            self.update()
+            event.accept()
+            return
 
         if self.active_handle is not None:
             norm_pt = self._widget_to_doc_norm(pos)
@@ -389,20 +437,19 @@ class GroundCalibratorWidget(QWidget):
             event.accept()
             return
 
-        if not self.is_picking_mode:
-            pts = self._get_widget_points()
-            old_h = self.hovered_handle
-            self.hovered_handle = None
-            for idx, pt in enumerate(pts):
-                dist = (pt - QPointF(pos)).manhattanLength()
-                if dist <= self.HANDLE_RADIUS + 6:
-                    self.hovered_handle = idx
-                    self.setCursor(Qt.PointingHandCursor)
-                    break
-            if self.hovered_handle is None:
-                self.setCursor(Qt.ArrowCursor)
-            if old_h != self.hovered_handle:
-                self.update()
+        pts = self._get_widget_points()
+        old_h = self.hovered_handle
+        self.hovered_handle = None
+        for idx, pt in enumerate(pts):
+            dist = (pt - QPointF(pos)).manhattanLength()
+            if dist <= self.HANDLE_RADIUS + 6:
+                self.hovered_handle = idx
+                self.setCursor(Qt.PointingHandCursor)
+                break
+        if self.hovered_handle is None:
+            self.setCursor(Qt.ArrowCursor)
+        if old_h != self.hovered_handle:
+            self.update()
 
         super().mouseMoveEvent(event)
 
@@ -563,17 +610,39 @@ class GroundCalibratorWidget(QWidget):
             painter.setPen(QColor(255, 255, 255))
             painter.drawText(int(pt.x() + r + 4), int(pt.y() + 4), name)
 
-        # 7. Sequential Picking Mode Banner
+        # 7. Sequential Picking Mode Banner & Rubber-band Guides
         if self.is_picking_mode:
-            painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
+            painter.setBrush(QBrush(QColor(15, 23, 42, 230)))
             painter.setPen(Qt.NoPen)
-            painter.drawRect(0, 0, w, 32)
+            painter.drawRect(0, 0, w, 34)
             painter.setPen(QColor(250, 204, 21))
             painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
-            step_names = ['1: Front-Left', '2: Front-Right', '3: Back-Right', '4: Back-Left']
+            step_names = ['1: Front-Left (Green)', '2: Front-Right (Red)', '3: Back-Right (Blue)', '4: Back-Left (Yellow)']
             cur_idx = min(3, len(self.picked_points))
-            msg = f"Click point {cur_idx + 1} of 4: {step_names[cur_idx]}"
-            painter.drawText(12, 21, msg)
+            msg = f"✏️ Drawing Mode — Click point {cur_idx + 1} of 4: {step_names[cur_idx]}  [Esc to cancel]"
+            painter.drawText(14, 22, msg)
+
+            # Draw lines and points for already clicked corners
+            clicked_pts = [
+                QPointF(self.img_rect.x() + p.x() * self.img_rect.width(),
+                        self.img_rect.y() + p.y() * self.img_rect.height())
+                for p in self.picked_points
+            ]
+            if clicked_pts:
+                p_pen = QPen(QColor(56, 189, 248), 2, Qt.DashLine)
+                painter.setPen(p_pen)
+                for i in range(len(clicked_pts) - 1):
+                    painter.drawLine(clicked_pts[i], clicked_pts[i+1])
+                if self.current_cursor_pos:
+                    painter.drawLine(clicked_pts[-1], QPointF(self.current_cursor_pos))
+
+                for i, cp in enumerate(clicked_pts):
+                    painter.setBrush(QBrush(handle_colors[i]))
+                    painter.setPen(QPen(QColor(255, 255, 255), 2))
+                    painter.drawEllipse(cp, 7, 7)
+                    painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.drawText(int(cp.x() + 9), int(cp.y() + 4), handle_names[i])
 
         painter.end()
 
@@ -589,13 +658,14 @@ class GroundCalibratorDialog(QDialog):
                  renderer=None, frame_rect=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("3D Ground Calibrator — Perspective Matching")
-        self.resize(840, 600)
+        self.resize(880, 620)
         self.setStyleSheet("""
             QDialog { background: #1c1e24; color: #f1f5f9; }
             QLabel { font-family: "Segoe UI"; font-size: 11px; color: #cbd5e1; }
+            QCheckBox { font-family: "Segoe UI"; font-size: 11px; color: #cbd5e1; spacing: 4px; }
             QPushButton {
                 background: #323642; border: 1px solid #434958; border-radius: 4px;
-                color: #e5e7eb; font-size: 11px; padding: 5px 10px; font-weight: bold;
+                color: #e5e7eb; font-size: 11px; padding: 4px 8px; font-weight: bold;
             }
             QPushButton:hover { background: #3d4352; color: #fff; }
             QPushButton:pressed { background: #242730; }
@@ -610,7 +680,7 @@ class GroundCalibratorDialog(QDialog):
             "📐 <b>Ground Calibrator</b>: Drag the 4 corner pins "
             "(<b style='color:#22c55e;'>1 FL</b> Front-Left, <b style='color:#ef4444;'>2 FR</b> Front-Right, "
             "<b style='color:#3b82f6;'>3 BR</b> Back-Right, <b style='color:#eab308;'>4 BL</b> Back-Left) "
-            "to match a ground plane in your artwork.<br>"
+            "or click <b>✏️ Draw 4 Points</b> to match an object/plane drawn on your canvas.<br>"
             "<span style='color:#94a3b8;font-size:10px;'>The 3D model is rendered live atop the rectangle and will be placed directly onto this ground upon applying.</span>"
         )
         hdr.setWordWrap(True)
@@ -639,19 +709,31 @@ class GroundCalibratorDialog(QDialog):
 
         # Toolbar
         bar = QHBoxLayout()
-        bar.setSpacing(8)
+        bar.setSpacing(6)
 
-        btn_pick = QPushButton("🎯 Click 4 Points")
-        btn_pick.setToolTip("Click 4 consecutive corners on your canvas to define the ground quad")
-        btn_pick.clicked.connect(self.calibrator_widget.start_pick_mode)
-        bar.addWidget(btn_pick)
+        btn_draw = QPushButton("✏️ Draw 4 Points")
+        btn_draw.setStyleSheet("background:#1e293b; color:#38bdf8; font-weight:bold; border:1px solid #0284c7; padding:4px 10px;")
+        btn_draw.setToolTip("Click 4 consecutive corners on your canvas (1 Front-Left, 2 Front-Right, 3 Back-Right, 4 Back-Left)")
+        btn_draw.clicked.connect(self.calibrator_widget.start_pick_mode)
+        bar.addWidget(btn_draw)
 
-        btn_center = QPushButton("⌖ Center Quad")
+        self.chk_keep_horizon = QCheckBox("Keep Horizon Horizontal")
+        self.chk_keep_horizon.setChecked(True)
+        self.chk_keep_horizon.setToolTip("Lock camera roll to 0° so the horizon line stays completely horizontal")
+        self.chk_keep_horizon.stateChanged.connect(self._on_keep_horizon_toggled)
+        bar.addWidget(self.chk_keep_horizon)
+
+        btn_flip = QPushButton("🔄 Flip 180°")
+        btn_flip.setToolTip("Flip model yaw 180° (toggle between facing front and back)")
+        btn_flip.clicked.connect(self._on_flip_clicked)
+        bar.addWidget(btn_flip)
+
+        btn_center = QPushButton("⌖ Center")
         btn_center.setToolTip("Centers the ground quad in view")
         btn_center.clicked.connect(self.calibrator_widget.center_quad)
         bar.addWidget(btn_center)
 
-        btn_reset = QPushButton("⟲ Reset Quad")
+        btn_reset = QPushButton("⟲ Reset")
         btn_reset.setToolTip("Resets the 4 pins to default perspective")
         btn_reset.clicked.connect(self.calibrator_widget.reset_points)
         bar.addWidget(btn_reset)
@@ -660,7 +742,7 @@ class GroundCalibratorDialog(QDialog):
 
         btn_apply = QPushButton("✔ Place Model on Ground & Apply")
         btn_apply.setStyleSheet(
-            "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 14px; font-size:12px;"
+            "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 14px; font-size:12px; font-weight:bold;"
         )
         btn_apply.setToolTip("Applies the solved camera and places the 3D model directly on top of the ground rectangle")
         btn_apply.clicked.connect(self._apply)
@@ -673,6 +755,12 @@ class GroundCalibratorDialog(QDialog):
         layout.addLayout(bar)
 
         self._on_solution_changed(self.calibrator_widget.last_solution)
+
+    def _on_keep_horizon_toggled(self, state):
+        self.calibrator_widget.set_keep_horizon(state == Qt.Checked)
+
+    def _on_flip_clicked(self):
+        self.calibrator_widget.toggle_flip_yaw()
 
     def _on_solution_changed(self, sol):
         yaw = sol.get("yaw", 180.0)

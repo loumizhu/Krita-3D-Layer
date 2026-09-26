@@ -378,11 +378,21 @@ def get_session_file_path():
 
 
 def load_session():
-    """Load persistent session data. Returns dict or empty dict on failure."""
+    """Load persistent session data. Falls back to packaged default_session.json."""
     path = get_session_file_path()
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                if d and isinstance(d, dict):
+                    return d
+        except Exception:
+            pass
+    # Fallback to packaged defaults
+    pkg_default = os.path.join(os.path.dirname(__file__), "default_session.json")
+    if os.path.exists(pkg_default):
+        try:
+            with open(pkg_default, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -491,7 +501,7 @@ class Krita3DLayerDocker(DockWidget):
         self.mesh_path = None
         self.frame_rect = None
         self.custom_bg_color = QColor(255, 255, 255)
-        self.is_sticky_viewport = False
+        self.is_sticky_viewport = True
 
         # Debounce timer for live canvas stamping
         self.live_sync_timer = QTimer(self)
@@ -508,11 +518,11 @@ class Krita3DLayerDocker(DockWidget):
         # =============================================================
         # SECTION 1: 3D VIEWPORT
         # =============================================================
-        self.sec_viewport = CollapsibleSection("3D VIEWPORT", expanded=True)
+        self.sec_viewport = CollapsibleSection("3D VIEWPORT", expanded=False)
 
         self.viewport = Viewport3D()
         self.viewport.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.viewport.setFixedHeight(230)
+        self.viewport.setFixedHeight(170)
         self.viewport.setMinimumHeight(60)
         self.viewport.camera_changed.connect(self._on_camera_changed)
         self.viewport.interaction_ended.connect(self._on_interaction_ended)
@@ -876,7 +886,10 @@ class Krita3DLayerDocker(DockWidget):
         calib_row = QHBoxLayout(); calib_row.setSpacing(2)
         btn_ground = QPushButton("📐 Ground Rect...")
         btn_ground.setStyleSheet("background:#2e3440; color:#fef08a; font-weight:bold; padding:4px 6px; border:1px solid #4c566a;")
-        btn_ground.setToolTip("Draw or adjust 4 ground points on your canvas to solve camera angles and place the 3D model directly on top")
+        btn_ground.setToolTip(
+            "Draw or adjust 4 ground points on your canvas to solve camera angles and place the 3D model directly on top.\n"
+            "This draws a rectangle if you already have drawn on your canvas an object that you want to have a 3D overhead so it quickly fits."
+        )
         btn_ground.clicked.connect(self._open_ground_calibrator)
         calib_row.addWidget(btn_ground, 3)
 
@@ -1088,7 +1101,7 @@ class Krita3DLayerDocker(DockWidget):
 
         # Sticky viewport setting
         self.chk_sticky_viewport = QCheckBox("Sticky Viewport (Always Visible on Scroll)")
-        self.chk_sticky_viewport.setChecked(False)
+        self.chk_sticky_viewport.setChecked(True)
         self.chk_sticky_viewport.setToolTip("When enabled, the 3D viewport stays pinned at the top of the docker and is always visible even when you scroll down through the controls")
         self.chk_sticky_viewport.stateChanged.connect(self._on_toggle_sticky_viewport)
         self.sec_settings.add_widget(self.chk_sticky_viewport)
@@ -1096,7 +1109,7 @@ class Krita3DLayerDocker(DockWidget):
         # Navigation direction preferences — split into X (L/R) and Y (U/D)
         nav_pref_row = QHBoxLayout(); nav_pref_row.setSpacing(2)
         self.chk_invert_pan = QCheckBox("Invert Pan")
-        self.chk_invert_pan.setChecked(False)
+        self.chk_invert_pan.setChecked(True)
         self.chk_invert_pan.setToolTip("Invert mouse dragging direction for viewport pan")
         self.chk_invert_pan.stateChanged.connect(self._on_toggle_invert_pan)
         nav_pref_row.addWidget(self.chk_invert_pan)
@@ -1104,7 +1117,7 @@ class Krita3DLayerDocker(DockWidget):
 
         orbit_inv_row = QHBoxLayout(); orbit_inv_row.setSpacing(2)
         self.chk_invert_orbit_x = QCheckBox("Invert Orbit L/R")
-        self.chk_invert_orbit_x.setChecked(False)
+        self.chk_invert_orbit_x.setChecked(True)
         self.chk_invert_orbit_x.setToolTip("Invert LEFT/RIGHT (yaw) mouse direction when orbiting")
         self.chk_invert_orbit_x.stateChanged.connect(self._on_toggle_invert_orbit_x)
         orbit_inv_row.addWidget(self.chk_invert_orbit_x)
@@ -1123,9 +1136,9 @@ class Krita3DLayerDocker(DockWidget):
         self.sl_grid_opac.setToolTip("Perspective grid lines opacity")
         self.sec_settings.add_widget(self.sl_grid_opac)
 
-        self.lbl_horizon_opac = QLabel("Horizon Opacity: 95%")
+        self.lbl_horizon_opac = QLabel("Horizon Opacity: 86%")
         self.sec_settings.add_widget(self.lbl_horizon_opac)
-        self.sl_horizon_opac = self._slider(10, 100, 95, self._on_horizon_opacity)
+        self.sl_horizon_opac = self._slider(10, 100, 86, self._on_horizon_opacity)
         self.sl_horizon_opac.setToolTip("Horizon line opacity")
         self.sec_settings.add_widget(self.sl_horizon_opac)
 
@@ -2300,8 +2313,15 @@ class Krita3DLayerDocker(DockWidget):
             # Navigation
             cam_mode = data.get("nav_camera_mode", CAMERA_MODE_ORBIT)
             self.viewport.camera_mode    = cam_mode
-            self.viewport.invert_pan     = bool(data.get("invert_pan", False))
-            self.viewport.invert_orbit_x = bool(data.get("invert_orbit_x", False))
+            if hasattr(self, "combo_cam_mode"):
+                idx = self.combo_cam_mode.findText(cam_mode)
+                if idx >= 0:
+                    self.combo_cam_mode.blockSignals(True)
+                    self.combo_cam_mode.setCurrentIndex(idx)
+                    self.combo_cam_mode.blockSignals(False)
+
+            self.viewport.invert_pan     = bool(data.get("invert_pan", True))
+            self.viewport.invert_orbit_x = bool(data.get("invert_orbit_x", True))
             self.viewport.invert_orbit_y = bool(data.get("invert_orbit_y", False))
 
             if hasattr(self, "chk_invert_pan"):
@@ -2311,9 +2331,27 @@ class Krita3DLayerDocker(DockWidget):
             if hasattr(self, "chk_invert_orbit_y"):
                 self.chk_invert_orbit_y.setChecked(self.viewport.invert_orbit_y)
 
-            self.is_sticky_viewport = bool(data.get("sticky_viewport", False))
+            self.is_sticky_viewport = bool(data.get("sticky_viewport", True))
             if hasattr(self, "chk_sticky_viewport"):
                 self.chk_sticky_viewport.setChecked(self.is_sticky_viewport)
+
+            # Section expand states
+            if "sec_viewport_exp" in data and hasattr(self, "sec_viewport"):
+                self.sec_viewport.set_expanded(bool(data["sec_viewport_exp"]))
+            if "sec_model_exp" in data and hasattr(self, "sec_model"):
+                self.sec_model.set_expanded(bool(data["sec_model_exp"]))
+            if "sec_cam_exp" in data and hasattr(self, "sec_cam"):
+                self.sec_cam.set_expanded(bool(data["sec_cam_exp"]))
+
+            # Automatically load default model if none is active
+            if self.mesh is None:
+                mpath = data.get("mesh_path", "")
+                if mpath and os.path.exists(mpath):
+                    self._load_mesh_file(mpath)
+                else:
+                    default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", "Asaro Head Planes.obj")
+                    if os.path.exists(default_asaro):
+                        self._load_mesh_file(default_asaro)
 
             self._sync_ui()
             self.viewport.update()

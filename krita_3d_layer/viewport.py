@@ -301,6 +301,17 @@ class Viewport3D(QWidget):
         self.is_dragging     = True
         self.drag_button     = event.button()
         self.drag_modifiers  = event.modifiers()
+        if event.button() == Qt.LeftButton and self.camera_mode == CAMERA_MODE_FIRST_PERSON:
+            rad_yaw = math.radians(self.camera.yaw)
+            rad_pitch = math.radians(self.camera.pitch)
+            offset = QVector3D(
+                self.camera.distance * math.cos(rad_pitch) * math.sin(rad_yaw),
+                self.camera.distance * math.sin(rad_pitch),
+                self.camera.distance * math.cos(rad_pitch) * math.cos(rad_yaw)
+            )
+            self._fp_eye = QVector3D(self.camera.target_x, self.camera.target_y, self.camera.target_z) + offset
+        else:
+            self._fp_eye = None
         super().mousePressEvent(event)
 
     def _get_cam_field(self, fid):
@@ -447,18 +458,19 @@ class Viewport3D(QWidget):
         if self.drag_button == Qt.LeftButton:
             orbit_speed = 0.55
             if self.camera_mode == CAMERA_MODE_FIRST_PERSON:
-                # First Person (Look Around):
-                # The camera eye position in world space stays stationary.
-                # Mouse dragging pans the camera's gaze direction from that exact viewpoint.
-                rad_yaw = math.radians(self.camera.yaw)
-                rad_pitch = math.radians(self.camera.pitch)
-                cur_eye = QVector3D(
-                    self.camera.distance * math.cos(rad_pitch) * math.sin(rad_yaw) + self.camera.target_x,
-                    self.camera.distance * math.sin(rad_pitch) + self.camera.target_y,
-                    self.camera.distance * math.cos(rad_pitch) * math.cos(rad_yaw) + self.camera.target_z
-                )
-                self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
-                self.camera.pitch = max(-89.0, min(89.0, self.camera.pitch - dy * orbit_speed * orbit_pitch_mult))
+                if self._fp_eye is None:
+                    rad_yaw = math.radians(self.camera.yaw)
+                    rad_pitch = math.radians(self.camera.pitch)
+                    offset = QVector3D(
+                        self.camera.distance * math.cos(rad_pitch) * math.sin(rad_yaw),
+                        self.camera.distance * math.sin(rad_pitch),
+                        self.camera.distance * math.cos(rad_pitch) * math.cos(rad_yaw)
+                    )
+                    self._fp_eye = QVector3D(self.camera.target_x, self.camera.target_y, self.camera.target_z) + offset
+
+                # First Person: turn gaze from stationary eye position
+                self.camera.yaw   = (self.camera.yaw   - dx * 0.45 * orbit_yaw_mult) % 360.0
+                self.camera.pitch = max(-88.0, min(88.0, self.camera.pitch - dy * 0.45 * orbit_pitch_mult))
 
                 new_rad_yaw = math.radians(self.camera.yaw)
                 new_rad_pitch = math.radians(self.camera.pitch)
@@ -467,17 +479,17 @@ class Viewport3D(QWidget):
                     self.camera.distance * math.sin(new_rad_pitch),
                     self.camera.distance * math.cos(new_rad_pitch) * math.cos(new_rad_yaw)
                 )
-                new_target = cur_eye - new_offset
+                new_target = self._fp_eye - new_offset
                 self.camera.target_x = new_target.x()
                 self.camera.target_y = new_target.y()
                 self.camera.target_z = new_target.z()
             elif self.camera_mode == CAMERA_MODE_TURNTABLE:
                 # Turntable (Locked Up):
-                # Locked to horizontal plane (no roll or lens tilt) with pure vertical pitch limits
+                # Locked upright with world +Y, pitch clamped above table [0, 85]
                 self.camera.roll  = 0.0
                 self.camera.tilt  = 0.0
                 self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
-                self.camera.pitch = max(-85.0, min(85.0, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
+                self.camera.pitch = max(0.0, min(85.0, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
             else:  # Orbit Around Object
                 self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
                 self.camera.pitch = max(-89.9, min(89.9, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
@@ -488,6 +500,7 @@ class Viewport3D(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        self._fp_eye = None
         # End info-bar scrub
         if self._info_scrub_field:
             self._info_scrub_field = None

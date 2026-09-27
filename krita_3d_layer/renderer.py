@@ -213,7 +213,8 @@ class PerspectiveGridSettings:
         self.grid_width = 1.0
         self.grid_opacity = 0.85
         self.axis_colors = True
-        self.fade_grid = True
+        self.fade_grid = False
+        self.horizon_always_horizontal = False
 
 
 class Camera3D:
@@ -552,7 +553,8 @@ class Renderer3D:
                 render_size, offset_x, offset_y, aspect=1.0)
             return pt
 
-        fade_active = bool(getattr(settings, 'fade_grid', True))
+        fade_active = bool(getattr(settings, 'fade_grid', False))
+        always_horizontal = bool(getattr(settings, 'horizon_always_horizontal', False))
 
         def clip_segment_near_plane(p1, p2, near_z=0.03):
             c1 = view_mat * QVector4D(p1[0], p1[1], p1[2], 1.0)
@@ -560,44 +562,22 @@ class Renderer3D:
             z1 = -c1.z()
             z2 = -c2.z()
             if z1 < near_z and z2 < near_z:
-                return None, None, 0.0, 0.0
+                return None, None
             v1 = QVector3D(*p1)
             v2 = QVector3D(*p2)
             if z1 < near_z:
                 denom = (z2 - z1)
                 t = (near_z - z1) / denom if abs(denom) > 1e-6 else 0.0
                 v1 = v1 * (1.0 - t) + v2 * t
-                z1 = near_z
             elif z2 < near_z:
                 denom = (z1 - z2)
                 t = (near_z - z2) / denom if abs(denom) > 1e-6 else 0.0
                 v2 = v2 * (1.0 - t) + v1 * t
-                z2 = near_z
-            return (v1.x(), v1.y(), v1.z()), (v2.x(), v2.y(), v2.z()), z1, z2
-
-        # Compute dynamic horizon fade distances
-        step_base = settings.tile_size
-        grid_ext_count = max(16, settings.grid_extent)
-        base_extent = grid_ext_count * step_base
-        fade_start = base_extent * 0.35
-        fade_end   = base_extent * 2.8 if settings.exceed_lines else base_extent * 1.2
-
-        def get_depth_alpha(z):
-            if not fade_active or z <= fade_start:
-                return 1.0
-            if z >= fade_end:
-                return 0.0
-            t = (z - fade_start) / (fade_end - fade_start)
-            return max(0.0, min(1.0, 0.5 * (1.0 + math.cos(math.pi * t))))
+            return (v1.x(), v1.y(), v1.z()), (v2.x(), v2.y(), v2.z())
 
         def draw_3d_segment(p1_3d, p2_3d, pen):
-            cp1, cp2, z1, z2 = clip_segment_near_plane(p1_3d, p2_3d, near_z=0.03)
+            cp1, cp2 = clip_segment_near_plane(p1_3d, p2_3d, near_z=0.03)
             if not cp1 or not cp2:
-                return
-
-            a1 = get_depth_alpha(z1)
-            a2 = get_depth_alpha(z2)
-            if fade_active and a1 <= 0.005 and a2 <= 0.005:
                 return
 
             if is_curvilinear:
@@ -606,57 +586,27 @@ class Renderer3D:
                 seg_len = (v2 - v1).length()
                 steps = max(24, min(80, int(seg_len * 12)))
                 curr_seg = []
+                painter.setPen(pen)
                 for s in range(steps + 1):
                     t  = s / float(steps)
                     vm = v1 * (1.0 - t) + v2 * t
-                    zs = z1 * (1.0 - t) + z2 * t
-                    as_ = get_depth_alpha(zs)
-                    if as_ <= 0.005:
-                        continue
                     pt = project_3d_point(vm.x(), vm.y(), vm.z())
                     if pt is not None:
-                        curr_seg.append((pt, as_))
+                        curr_seg.append(pt)
                     else:
                         if len(curr_seg) >= 2:
                             for idx in range(len(curr_seg) - 1):
-                                p_a = curr_seg[idx][0]
-                                p_b = curr_seg[idx + 1][0]
-                                a_mid = (curr_seg[idx][1] + curr_seg[idx + 1][1]) * 0.5
-                                step_pen = QPen(pen)
-                                c = step_pen.color()
-                                c.setAlpha(int(c.alpha() * a_mid))
-                                step_pen.setColor(c)
-                                painter.setPen(step_pen)
-                                painter.drawLine(p_a, p_b)
+                                painter.drawLine(curr_seg[idx], curr_seg[idx + 1])
                         curr_seg = []
                 if len(curr_seg) >= 2:
                     for idx in range(len(curr_seg) - 1):
-                        p_a = curr_seg[idx][0]
-                        p_b = curr_seg[idx + 1][0]
-                        a_mid = (curr_seg[idx][1] + curr_seg[idx + 1][1]) * 0.5
-                        step_pen = QPen(pen)
-                        c = step_pen.color()
-                        c.setAlpha(int(c.alpha() * a_mid))
-                        step_pen.setColor(c)
-                        painter.setPen(step_pen)
-                        painter.drawLine(p_a, p_b)
+                        painter.drawLine(curr_seg[idx], curr_seg[idx + 1])
                 return
 
             pt1 = project_3d_point(*cp1)
             pt2 = project_3d_point(*cp2)
             if pt1 and pt2:
-                if fade_active and (a1 < 0.99 or a2 < 0.99):
-                    grad = QLinearGradient(pt1, pt2)
-                    c1 = QColor(pen.color())
-                    c1.setAlpha(int(c1.alpha() * a1))
-                    c2 = QColor(pen.color())
-                    c2.setAlpha(int(c2.alpha() * a2))
-                    grad.setColorAt(0.0, c1)
-                    grad.setColorAt(1.0, c2)
-                    f_pen = QPen(QBrush(grad), pen.widthF(), pen.style(), pen.capStyle(), pen.joinStyle())
-                    painter.setPen(f_pen)
-                else:
-                    painter.setPen(pen)
+                painter.setPen(pen)
                 painter.drawLine(pt1, pt2)
             elif pt1 or pt2:
                 v1 = QVector3D(*cp1)
@@ -682,9 +632,9 @@ class Renderer3D:
             sub      = max(1, settings.subdivisions)
             step     = settings.tile_size
             sub_step = step / float(sub)
-            grid_ext_count = max(16, settings.grid_extent)
+            grid_ext_count = max(10, settings.grid_extent)
             extent   = grid_ext_count * step
-            max_range = extent * (3.0 if is_curvilinear else (10.0 if settings.exceed_lines else 1.0))
+            max_range = extent * (3.0 if is_curvilinear else (8.0 if settings.exceed_lines else 1.0))
 
             num_dense  = int(round(extent / sub_step))
             num_exceed = int(round(max_range / step))
@@ -711,11 +661,39 @@ class Renderer3D:
                 else:
                     col = QColor(settings.sub_color); col.setAlpha(int(col.alpha() * grid_opacity))
                     pen = QPen(col, max(0.5, settings.grid_width * 0.7), Qt.DotLine)
-                z_reach = max_range if (settings.exceed_lines and is_main) else extent
-                draw_3d_segment((x, plane_y, -z_reach), (x, plane_y, z_reach), pen)
+
+                if fade_active and settings.exceed_lines and is_main and max_range > extent:
+                    # Core grid segment (solid, never faded)
+                    draw_3d_segment((x, plane_y, -extent), (x, plane_y, extent), pen)
+                    # Smooth discrete fading into horizon
+                    z_m1 = min(max_range, extent * 2.2)
+                    z_m2 = min(max_range, extent * 4.5)
+                    col_f1 = QColor(col); col_f1.setAlpha(int(col.alpha() * 0.60))
+                    col_f2 = QColor(col); col_f2.setAlpha(int(col.alpha() * 0.30))
+                    col_f3 = QColor(col); col_f3.setAlpha(int(col.alpha() * 0.10))
+                    pen_f1 = QPen(col_f1, pen.widthF(), pen.style())
+                    pen_f2 = QPen(col_f2, max(0.5, pen.widthF() * 0.8), pen.style())
+                    pen_f3 = QPen(col_f3, max(0.5, pen.widthF() * 0.6), pen.style())
+
+                    # Positive Z extension
+                    draw_3d_segment((x, plane_y, extent), (x, plane_y, z_m1), pen_f1)
+                    if max_range > z_m1:
+                        draw_3d_segment((x, plane_y, z_m1), (x, plane_y, z_m2), pen_f2)
+                    if max_range > z_m2:
+                        draw_3d_segment((x, plane_y, z_m2), (x, plane_y, max_range), pen_f3)
+
+                    # Negative Z extension
+                    draw_3d_segment((x, plane_y, -z_m1), (x, plane_y, -extent), pen_f1)
+                    if max_range > z_m1:
+                        draw_3d_segment((x, plane_y, -z_m2), (x, plane_y, -z_m1), pen_f2)
+                    if max_range > z_m2:
+                        draw_3d_segment((x, plane_y, -max_range), (x, plane_y, -z_m2), pen_f3)
+                else:
+                    z_reach = max_range if (settings.exceed_lines and is_main) else extent
+                    draw_3d_segment((x, plane_y, -z_reach), (x, plane_y, z_reach), pen)
 
             for x in outer_x:
-                col = QColor(base_col); col.setAlpha(int(col.alpha() * grid_opacity * 0.65))
+                col = QColor(base_col); col.setAlpha(int(col.alpha() * grid_opacity * (0.35 if fade_active else 0.65)))
                 pen = QPen(col, max(0.5, settings.grid_width * 0.8))
                 draw_3d_segment((x, plane_y, -max_range), (x, plane_y, max_range), pen)
 
@@ -745,7 +723,8 @@ class Renderer3D:
                 draw_3d_segment((-x_reach, plane_y, z), (x_reach, plane_y, z), pen)
 
             for z in outer_z:
-                col = QColor(base_col); col.setAlpha(int(col.alpha() * grid_opacity * 0.65))
+                fade_m = (1.0 - min(1.0, (abs(z) - extent) / max(1.0, max_range - extent))) if fade_active else 1.0
+                col = QColor(base_col); col.setAlpha(int(col.alpha() * grid_opacity * 0.65 * max(0.1, fade_m)))
                 pen = QPen(col, max(0.5, settings.grid_width * 0.8))
                 draw_3d_segment((-max_range, plane_y, z), (max_range, plane_y, z), pen)
 
@@ -833,7 +812,7 @@ class Renderer3D:
                     cx_center = width  * 0.5
                     cy_center = height * 0.5
                     cy_h  = cy_center - f_eff * (nz / ny)
-                    slope = nx / ny
+                    slope = 0.0 if always_horizontal else (nx / ny)
                     x_left  = -width * 2.0
                     y_left  = cy_h + slope * (x_left - cx_center)
                     x_right = width * 3.0

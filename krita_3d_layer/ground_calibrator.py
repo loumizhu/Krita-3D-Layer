@@ -252,7 +252,7 @@ class GroundCalibratorWidget(QWidget):
         self.is_picking_mode = False
         self.picked_points = []
         self.keep_horizon = True
-        self.flip_yaw = False
+        self.flip_yaw = True
         self.current_cursor_pos = None
 
         # Current image rect within widget (for letterbox/aspect mapping)

@@ -995,11 +995,17 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_grid.add_layout(gr_toggles)
 
         hr_row = QHBoxLayout(); hr_row.setSpacing(2)
-        self.chk_grid_horizon = QCheckBox("Horizon Line")
+        self.chk_grid_horizon = QCheckBox("Horizon")
         self.chk_grid_horizon.setChecked(True)
-        self.chk_grid_horizon.setToolTip("Draw guaranteed-visible eye-level horizon line across canvas")
+        self.chk_grid_horizon.setToolTip("Draw eye-level horizon line across canvas")
         self.chk_grid_horizon.stateChanged.connect(self._on_grid_changed)
         hr_row.addWidget(self.chk_grid_horizon)
+
+        self.chk_horizon_level = QCheckBox("Level")
+        self.chk_horizon_level.setChecked(False)
+        self.chk_horizon_level.setToolTip("Always Horizontal: keep horizon line strictly horizontal regardless of camera roll")
+        self.chk_horizon_level.stateChanged.connect(self._on_grid_changed)
+        hr_row.addWidget(self.chk_horizon_level)
 
         self.chk_grid_ground = QCheckBox("Ground Grid")
         self.chk_grid_ground.setChecked(True)
@@ -1060,7 +1066,7 @@ class Krita3DLayerDocker(DockWidget):
         fade_row.addWidget(self.chk_grid_exceed)
 
         self.chk_fade_grid = QCheckBox("Fade Horizon")
-        self.chk_fade_grid.setChecked(True)
+        self.chk_fade_grid.setChecked(False)
         self.chk_fade_grid.setToolTip("Activate Fading Grid: Grid lines extend to the horizon line but fade out smoothly little by little")
         self.chk_fade_grid.stateChanged.connect(self._on_grid_changed)
         fade_row.addWidget(self.chk_fade_grid)
@@ -1901,6 +1907,8 @@ class Krita3DLayerDocker(DockWidget):
         gs.enabled = self.chk_grid_canvas.isChecked()
         gs.show_in_viewport = self.chk_grid_viewport.isChecked()
         gs.horizon_enabled = self.chk_grid_horizon.isChecked()
+        if hasattr(self, 'chk_horizon_level'):
+            gs.horizon_always_horizontal = self.chk_horizon_level.isChecked()
         gs.ground_enabled = self.chk_grid_ground.isChecked()
         gs.ceiling_enabled = self.chk_grid_ceiling.isChecked()
         gs.ceiling_height = self.spin_grid_cheight.value()
@@ -2283,10 +2291,14 @@ class Krita3DLayerDocker(DockWidget):
     def showEvent(self, event):
         super().showEvent(event)
         try:
+            self._restore_session()
             self._match_ratio()
             if hasattr(self, "is_sticky_viewport"):
                 self._apply_sticky_viewport(self.is_sticky_viewport)
+            self._sync_ui()
             self.viewport.update()
+            if hasattr(self, 'chk_live') and self.chk_live.isChecked():
+                self._live_sync()
         except Exception:
             pass
 
@@ -2383,6 +2395,7 @@ class Krita3DLayerDocker(DockWidget):
             "grid_canvas":          bool(gs.enabled),
             "grid_viewport":        bool(gs.show_in_viewport),
             "grid_horizon":         bool(gs.horizon_enabled),
+            "horizon_always_horizontal": bool(getattr(gs, "horizon_always_horizontal", False)),
             "grid_ground":          bool(gs.ground_enabled),
             "grid_ceiling":         bool(gs.ceiling_enabled),
             "grid_ceil_h":          float(gs.ceiling_height),
@@ -2390,7 +2403,7 @@ class Krita3DLayerDocker(DockWidget):
             "grid_tile":            float(gs.tile_size),
             "grid_subdiv":          int(gs.subdivisions),
             "grid_exceed":          bool(gs.exceed_lines),
-            "grid_fade":            bool(getattr(gs, "fade_grid", True)),
+            "grid_fade":            bool(getattr(gs, "fade_grid", False)),
             "grid_verticals":       bool(gs.vertical_lines),
             "grid_vert_h":          float(gs.vertical_height),
             "grid_axis_col":        bool(gs.axis_colors),
@@ -2675,6 +2688,7 @@ class Krita3DLayerDocker(DockWidget):
             gs.enabled = bool(data.get("grid_canvas", True))
             gs.show_in_viewport = bool(data.get("grid_viewport", True))
             gs.horizon_enabled = bool(data.get("grid_horizon", True))
+            gs.horizon_always_horizontal = bool(data.get("horizon_always_horizontal", False))
             gs.ground_enabled = bool(data.get("grid_ground", True))
             gs.ceiling_enabled = bool(data.get("grid_ceiling", False))
             gs.ceiling_height = float(data.get("grid_ceil_h", 2.5))
@@ -2682,7 +2696,7 @@ class Krita3DLayerDocker(DockWidget):
             gs.tile_size = float(data.get("grid_tile", 0.5))
             gs.subdivisions = int(data.get("grid_subdiv", 1))
             gs.exceed_lines = bool(data.get("grid_exceed", True))
-            gs.fade_grid = bool(data.get("grid_fade", True))
+            gs.fade_grid = bool(data.get("grid_fade", False))
             gs.vertical_lines = bool(data.get("grid_verticals", True))
             gs.vertical_height = float(data.get("grid_vert_h", 2.5))
             gs.axis_colors = bool(data.get("grid_axis_col", True))
@@ -2701,6 +2715,10 @@ class Krita3DLayerDocker(DockWidget):
                 self.chk_grid_horizon.blockSignals(True)
                 self.chk_grid_horizon.setChecked(gs.horizon_enabled)
                 self.chk_grid_horizon.blockSignals(False)
+            if hasattr(self, "chk_horizon_level"):
+                self.chk_horizon_level.blockSignals(True)
+                self.chk_horizon_level.setChecked(gs.horizon_always_horizontal)
+                self.chk_horizon_level.blockSignals(False)
             if hasattr(self, "chk_grid_ground"):
                 self.chk_grid_ground.blockSignals(True)
                 self.chk_grid_ground.setChecked(gs.ground_enabled)

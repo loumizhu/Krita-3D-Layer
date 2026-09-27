@@ -8,7 +8,8 @@ backface culling, and comprehensive 3D perspective grids.
 import math
 from PyQt5.QtGui import (
     QMatrix4x4, QVector3D, QVector4D, QPainter, QImage,
-    QColor, QBrush, QPen, QPolygonF, QFont, QPainterPath
+    QColor, QBrush, QPen, QPolygonF, QFont, QPainterPath,
+    QLinearGradient
 )
 from PyQt5.QtCore import QPointF, Qt
 

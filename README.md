@@ -12,10 +12,9 @@ It ships with a built-in **Asaro Head** so you can start studying planes and val
 
 ## 🎬 Video Showcase
 
-<!-- Add your video link or embed below -->
-> 🎥 **video demo**
-> 
-> *(A quick video showing how fast you can position models, tweak lights, and stamp them to your canvas will be posted here soon.)*
+[![Krita 3D Layer Video Demo](https://img.youtube.com/vi/qMYg-C_WqQc/maxresdefault.jpg)](https://youtu.be/qMYg-C_WqQc)
+
+> 🎥 **Watch the Demo on YouTube:** [https://youtu.be/qMYg-C_WqQc](https://youtu.be/qMYg-C_WqQc)
 
 ---
 

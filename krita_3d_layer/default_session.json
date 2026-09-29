@@ -70,6 +70,7 @@
   "show_top_labels": true,
   "show_orbit_button": true,
   "show_quick_toolbar": true,
+  "quick_toolbar_btn_height": 26,
   "bg_use_gradient": true,
   "bg_color_top": "#323844",
   "bg_color_bottom": "#181b22",

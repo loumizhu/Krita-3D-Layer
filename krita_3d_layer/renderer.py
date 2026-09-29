@@ -94,7 +94,9 @@ def project_cam_coords(camera, xc, yc, zc, render_size, offset_x=0.0, offset_y=0
 
         eff_fov   = min(250.0, max(40.0, fish_fov * fish_mult))
         max_theta = math.radians(eff_fov * 0.5)
-        if theta > max_theta:
+        # In full-frame fisheye, points across the front hemisphere (up to 95°) project onto the canvas corners
+        cutoff_theta = max(max_theta, math.radians(min(185.0, eff_fov) * 0.5))
+        if theta > cutoff_theta:
             return None, None
 
         norm_theta = theta / max_theta
@@ -432,6 +434,80 @@ class Lighting3D:
         return key, fill
 
 
+def get_curvilinear_subdivided_mesh(mesh, max_faces=1200):
+    """
+    Subdivides low-poly mesh faces into smaller triangles for curvilinear fisheye rendering.
+    Allows flat polygons (such as box sides or cylinder walls) to bow smoothly with true barrel distortion.
+    Caches result on mesh instance.
+    """
+    if not mesh or not getattr(mesh, 'faces', None):
+        return (mesh.vertices if mesh else []), (mesh.faces if mesh else []), (mesh.face_normals if mesh else [])
+
+    n_faces = len(mesh.faces)
+    if n_faces >= max_faces:
+        return mesh.vertices, mesh.faces, mesh.face_normals
+
+    # Determine subdivision depth
+    if n_faces <= 32:       # e.g. Box (12 faces), Pyramid (6 faces), Plane (2-8 faces)
+        depth = 2           # 12 -> 192 faces
+    elif n_faces <= 300:    # e.g. Cylinder (48 faces), Cone (48 faces), Sphere (96 faces)
+        depth = 1           # 48 -> 192 faces
+    else:
+        depth = 0
+
+    if depth == 0:
+        return mesh.vertices, mesh.faces, mesh.face_normals
+
+    cache = getattr(mesh, "_curv_subdiv_cache", None)
+    if cache and cache[0] == depth and cache[1] == len(mesh.vertices):
+        return cache[2], cache[3], cache[4]
+
+    curr_verts = list(mesh.vertices)
+    curr_faces = list(mesh.faces)
+
+    for _ in range(depth):
+        edge_midpoints = {}
+        next_faces = []
+
+        def get_midpoint(i1, i2):
+            k = (i1, i2) if i1 < i2 else (i2, i1)
+            if k in edge_midpoints:
+                return edge_midpoints[k]
+            v1 = curr_verts[i1]
+            v2 = curr_verts[i2]
+            mid = QVector3D((v1.x() + v2.x()) * 0.5,
+                            (v1.y() + v2.y()) * 0.5,
+                            (v1.z() + v2.z()) * 0.5)
+            idx = len(curr_verts)
+            curr_verts.append(mid)
+            edge_midpoints[k] = idx
+            return idx
+
+        for f in curr_faces:
+            a, b, c = f[0], f[1], f[2]
+            ab = get_midpoint(a, b)
+            bc = get_midpoint(b, c)
+            ca = get_midpoint(c, a)
+            next_faces.append((a, ab, ca))
+            next_faces.append((b, bc, ab))
+            next_faces.append((c, ca, bc))
+            next_faces.append((ab, bc, ca))
+
+        curr_faces = next_faces
+
+    # Recompute face normals
+    new_normals = []
+    for f in curr_faces:
+        v0 = curr_verts[f[0]]
+        v1 = curr_verts[f[1]]
+        v2 = curr_verts[f[2]]
+        n = QVector3D.crossProduct(v1 - v0, v2 - v0).normalized()
+        new_normals.append(n)
+
+    mesh._curv_subdiv_cache = (depth, len(mesh.vertices), curr_verts, curr_faces, new_normals)
+    return curr_verts, curr_faces, new_normals
+
+
 class Renderer3D:
     def __init__(self):
         self.base_color    = QColor(228, 231, 236)
@@ -477,8 +553,8 @@ class Renderer3D:
         proj_mode = getattr(camera, 'projection_mode', ProjectionMode.PERSPECTIVE)
         is_curvilinear = (proj_mode not in (ProjectionMode.PERSPECTIVE, ProjectionMode.ARTIST_LINEAR, ProjectionMode.ORTHOGRAPHIC))
 
-        # For fisheye / curvilinear use full extent so model fills viewport
-        render_size = max(width, height) if is_curvilinear else min(width, height)
+        # For fisheye / curvilinear use full diagonal extent so model fills entire viewport and canvas
+        render_size = math.hypot(width, height) if is_curvilinear else min(width, height)
         offset_x = (width  - render_size) * 0.5
         offset_y = (height - render_size) * 0.5
 
@@ -500,9 +576,15 @@ class Renderer3D:
 
         half_size = render_size * 0.5
 
+        # Subdivide surfaces for curvilinear barrel distortion if low-poly
+        if is_curvilinear:
+            r_verts, r_faces, r_normals = get_curvilinear_subdivided_mesh(mesh)
+        else:
+            r_verts, r_faces, r_normals = mesh.vertices, mesh.faces, mesh.face_normals
+
         screen_pts = []
         ndc_pts    = []
-        for v in mesh.vertices:
+        for v in r_verts:
             pt, ndc_z = project_camera_point(
                 camera, model_view, v.x(), v.y(), v.z(),
                 render_size, offset_x, offset_y, aspect=1.0)
@@ -513,13 +595,16 @@ class Renderer3D:
                 screen_pts.append(pt)
                 ndc_pts.append((0.0, 0.0, ndc_z if ndc_z is not None else 0.0))
 
+        # Project original vertices for edge backface culling
+        orig_screen_pts = screen_pts[:len(mesh.vertices)] if is_curvilinear else screen_pts
+
         visible_faces  = []
         is_wire_only   = (style == RenderStyle.WIREFRAME)
         is_normal_map  = (style == RenderStyle.NORMAL_MAP)
         is_silhouette  = (style == RenderStyle.SILHOUETTE)
         is_shaded_wire = (style == RenderStyle.SHADED_WIREFRAME)
 
-        for i, face in enumerate(mesh.faces):
+        for i, face in enumerate(r_faces):
             p0 = screen_pts[face[0]]; p1 = screen_pts[face[1]]; p2 = screen_pts[face[2]]
 
             cross2d   = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
@@ -534,14 +619,14 @@ class Renderer3D:
             if is_silhouette:
                 face_color = self.base_color
             elif is_normal_map:
-                norm = mesh.face_normals[i] if i < len(mesh.face_normals) else QVector3D(0, 1, 0)
+                norm = r_normals[i] if i < len(r_normals) else QVector3D(0, 1, 0)
                 if has_rot and rot_mat:
                     norm = rot_mat.map(norm).normalized()
                 face_color = QColor(int((norm.x()*0.5+0.5)*255),
                                     int((norm.y()*0.5+0.5)*255),
                                     int((norm.z()*0.5+0.5)*255))
             elif not is_wire_only:
-                norm = mesh.face_normals[i] if i < len(mesh.face_normals) else QVector3D(0, 1, 0)
+                norm = r_normals[i] if i < len(r_normals) else QVector3D(0, 1, 0)
                 if has_rot and rot_mat:
                     norm = rot_mat.map(norm).normalized()
                 dot_key  = max(0.0, norm.x()*key_dir.x()+norm.y()*key_dir.y()+norm.z()*key_dir.z())
@@ -558,6 +643,40 @@ class Renderer3D:
 
         visible_faces.sort(key=lambda item: item[0], reverse=True)
 
+        # Helper to draw a model edge with physical 3D curvature in curvilinear modes
+        def draw_model_edge(idx_a, idx_b, pen):
+            if is_curvilinear:
+                vA_3d = mesh.vertices[idx_a]
+                vB_3d = mesh.vertices[idx_b]
+                steps = 18
+                curr_pts = []
+                painter.setPen(pen)
+                for s in range(steps + 1):
+                    t = s / float(steps)
+                    vx = vA_3d.x() * (1.0 - t) + vB_3d.x() * t
+                    vy = vA_3d.y() * (1.0 - t) + vB_3d.y() * t
+                    vz = vA_3d.z() * (1.0 - t) + vB_3d.z() * t
+                    pt, _ = project_camera_point(
+                        camera, model_view, vx, vy, vz,
+                        render_size, offset_x, offset_y, aspect=1.0)
+                    if pt is not None:
+                        curr_pts.append(pt)
+                    else:
+                        if len(curr_pts) >= 2:
+                            for j in range(len(curr_pts) - 1):
+                                painter.drawLine(curr_pts[j], curr_pts[j + 1])
+                        curr_pts = []
+                if len(curr_pts) >= 2:
+                    for j in range(len(curr_pts) - 1):
+                        painter.drawLine(curr_pts[j], curr_pts[j + 1])
+            else:
+                pA = orig_screen_pts[idx_a]
+                pB = orig_screen_pts[idx_b]
+                if pA.x() > -9000 and pB.x() > -9000:
+                    painter.setPen(pen)
+                    painter.drawLine(pA, pB)
+
+        # Contour pass
         if self.contour_width > 0.1 and not is_wire_only:
             c_pen = QPen(self.contour_color, self.contour_width*2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(c_pen)
@@ -574,37 +693,26 @@ class Renderer3D:
                 painter.setBrush(QBrush(f_color))
                 painter.drawPolygon(poly)
         elif is_shaded_wire:
-            # Draw shaded faces and their wireframe edges interleaved in painter's algorithm order.
-            # This ensures foreground faces naturally occlude all background edges (eliminates backface bleed).
-            wire_pen = QPen(self.wire_color, self.wire_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            coplanar = getattr(mesh, "coplanar_edges", set()) if self.hide_coplanar_edges else set()
+            # Draw shaded faces first (subdivided for curvature)
             for _, face, f_color in visible_faces:
                 poly = QPolygonF([screen_pts[face[0]], screen_pts[face[1]], screen_pts[face[2]]])
                 painter.setPen(QPen(f_color, 0.7))
                 painter.setBrush(QBrush(f_color))
                 painter.drawPolygon(poly)
 
-                painter.setPen(wire_pen)
-                painter.setBrush(Qt.NoBrush)
-                v0, v1, v2 = face[0], face[1], face[2]
-                for e in ((v0, v1) if v0 < v1 else (v1, v0),
-                          (v1, v2) if v1 < v2 else (v2, v1),
-                          (v2, v0) if v2 < v0 else (v0, v2)):
-                    if self.hide_coplanar_edges and e in coplanar:
-                        continue
-                    pA = screen_pts[e[0]]
-                    pB = screen_pts[e[1]]
-                    if pA.x() > -9000 and pB.x() > -9000:
-                        painter.drawLine(pA, pB)
-
-        # Wireframe edges pass (for Wireframe Only mode)
-        if is_wire_only:
+            # Draw structural wireframe edges with 3D multi-point curvature
             wire_pen = QPen(self.wire_color, self.wire_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(wire_pen)
             painter.setBrush(Qt.NoBrush)
+
             coplanar = getattr(mesh, "coplanar_edges", set()) if self.hide_coplanar_edges else set()
+            poly_edges = getattr(mesh, "polygon_edges", None)
             drawn_edges = set()
-            for _, face, _ in visible_faces:
+
+            for i, face in enumerate(mesh.faces):
+                p0 = orig_screen_pts[face[0]]; p1 = orig_screen_pts[face[1]]; p2 = orig_screen_pts[face[2]]
+                cross2d = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
+                if self.wireframe_backface_culling and cross2d >= 0.0:
+                    continue
                 v0, v1, v2 = face[0], face[1], face[2]
                 for e in ((v0, v1) if v0 < v1 else (v1, v0),
                           (v1, v2) if v1 < v2 else (v2, v1),
@@ -612,14 +720,39 @@ class Renderer3D:
                     if e in drawn_edges:
                         continue
                     drawn_edges.add(e)
-                    if self.hide_coplanar_edges and e in coplanar:
+                    if poly_edges is not None and e not in poly_edges:
                         continue
-                    pA = screen_pts[e[0]]
-                    pB = screen_pts[e[1]]
-                    if pA.x() > -9000 and pB.x() > -9000:
-                        painter.drawLine(pA, pB)
+                    if poly_edges is None and self.hide_coplanar_edges and e in coplanar:
+                        continue
+                    draw_model_edge(e[0], e[1], wire_pen)
 
-        # Circular fisheye vignette mask
+        # Wireframe edges pass (for Wireframe Only mode)
+        if is_wire_only:
+            wire_pen = QPen(self.wire_color, self.wire_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setBrush(Qt.NoBrush)
+            coplanar = getattr(mesh, "coplanar_edges", set()) if self.hide_coplanar_edges else set()
+            poly_edges = getattr(mesh, "polygon_edges", None)
+            drawn_edges = set()
+
+            for face in mesh.faces:
+                p0 = orig_screen_pts[face[0]]; p1 = orig_screen_pts[face[1]]; p2 = orig_screen_pts[face[2]]
+                cross2d = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
+                if self.wireframe_backface_culling and cross2d >= 0.0:
+                    continue
+                v0, v1, v2 = face[0], face[1], face[2]
+                for e in ((v0, v1) if v0 < v1 else (v1, v0),
+                          (v1, v2) if v1 < v2 else (v2, v1),
+                          (v2, v0) if v2 < v0 else (v0, v2)):
+                    if e in drawn_edges:
+                        continue
+                    drawn_edges.add(e)
+                    if poly_edges is not None and e not in poly_edges:
+                        continue
+                    if poly_edges is None and self.hide_coplanar_edges and e in coplanar:
+                        continue
+                    draw_model_edge(e[0], e[1], wire_pen)
+
+        # Circular fisheye vignette mask (only if user explicitly checked it)
         if proj_mode == ProjectionMode.FISHEYE and getattr(camera, 'fisheye_crop_circle', False):
             r_circ = half_size * getattr(camera, 'fisheye_zoom', 1.0)
             center = QPointF(half_size + offset_x, half_size + offset_y)
@@ -647,9 +780,9 @@ class Renderer3D:
         is_curvilinear = (proj_mode not in (ProjectionMode.PERSPECTIVE, ProjectionMode.ARTIST_LINEAR, ProjectionMode.ORTHOGRAPHIC))
         is_artist_5vp  = (proj_mode == ProjectionMode.ARTIST_5VP)
 
-        # Key fix: use FULL size for curvilinear so grid fills entire viewport
+        # Key fix: use diagonal extent for curvilinear so grid fills entire viewport and corners
         if is_curvilinear:
-            render_size = max(width, height)
+            render_size = math.hypot(width, height)
         else:
             render_size = min(width, height)
 

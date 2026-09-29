@@ -1650,6 +1650,23 @@ class Krita3DLayerDocker(DockWidget):
         vh_row.addWidget(btn_rst_vh, 0)
         self.sec_viewport_settings.add_layout(vh_row)
 
+        # 3b. Quick Toolbar Button Height Control
+        lbl_qt_size = QLabel("Quick Toolbar Button Height:")
+        lbl_qt_size.setStyleSheet("font-weight:bold; color:#93c5fd; margin-top:4px;")
+        self.sec_viewport_settings.add_widget(lbl_qt_size)
+
+        qt_row = QHBoxLayout(); qt_row.setSpacing(4)
+        init_btn_h = getattr(self.quick_toolbar, "button_height", 26) if hasattr(self, "quick_toolbar") else 26
+        self.spin_qt_btn_height = self._ispin(20, 50, init_btn_h, 2, self._on_qt_btn_height_spin)
+        self.spin_qt_btn_height.setToolTip("Adjust quick toolbar button height in pixels (20px compact to 50px large)")
+        qt_row.addWidget(ScrubLabel("Height (px):", self.spin_qt_btn_height))
+        qt_row.addWidget(self.spin_qt_btn_height, 1)
+
+        btn_rst_qth = QPushButton("Reset 26px")
+        btn_rst_qth.clicked.connect(lambda: self.spin_qt_btn_height.setValue(26))
+        qt_row.addWidget(btn_rst_qth, 0)
+        self.sec_viewport_settings.add_layout(qt_row)
+
         # 4. Navigation Preferences
         lbl_nav = QLabel("Mouse Drag Navigation Directions:")
         lbl_nav.setStyleSheet("font-weight:bold; color:#93c5fd; margin-top:4px;")
@@ -3349,6 +3366,12 @@ class Krita3DLayerDocker(DockWidget):
             self.spin_vp_height.blockSignals(False)
         self._schedule_save()
 
+    def _on_qt_btn_height_spin(self):
+        if hasattr(self, 'spin_qt_btn_height') and hasattr(self, 'quick_toolbar'):
+            h = self.spin_qt_btn_height.value()
+            self.quick_toolbar.set_button_height(h)
+            self._schedule_save()
+
     def _on_toggle_invert_pan(self, state):
         self.viewport.invert_pan = (state == Qt.Checked)
         self._schedule_save()
@@ -3609,6 +3632,7 @@ class Krita3DLayerDocker(DockWidget):
             "bg_color_top":         self.viewport.bg_color_top.name() if hasattr(self.viewport, 'bg_color_top') else "#323844",
             "bg_color_bottom":      self.viewport.bg_color_bottom.name() if hasattr(self.viewport, 'bg_color_bottom') else "#181b22",
             "quick_toolbar_items":  self.quick_toolbar.get_items() if hasattr(self, 'quick_toolbar') else [],
+            "quick_toolbar_btn_height": getattr(self.quick_toolbar, "button_height", 26) if hasattr(self, "quick_toolbar") else 26,
 
             # Camera Navigation & Transform
             "nav_camera_mode":      self.viewport.camera_mode,
@@ -3845,6 +3869,14 @@ class Krita3DLayerDocker(DockWidget):
             qt_items = data.get("quick_toolbar_items")
             if qt_items and hasattr(self, "quick_toolbar"):
                 self.quick_toolbar.set_items(qt_items)
+
+            qtb_h = data.get("quick_toolbar_btn_height", 26)
+            if hasattr(self, "quick_toolbar") and 20 <= qtb_h <= 50:
+                self.quick_toolbar.set_button_height(qtb_h)
+            if hasattr(self, "spin_qt_btn_height"):
+                self.spin_qt_btn_height.blockSignals(True)
+                self.spin_qt_btn_height.setValue(qtb_h)
+                self.spin_qt_btn_height.blockSignals(False)
 
             show_qt = bool(data.get("show_quick_toolbar", True))
             if hasattr(self, "quick_toolbar"):

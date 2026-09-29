@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel,
     QScrollArea, QFrame, QDialog, QListWidget, QListWidgetItem,
     QComboBox, QColorDialog, QLineEdit, QMessageBox, QInputDialog,
-    QSizePolicy, QLayout
+    QSizePolicy, QLayout, QSpinBox
 )
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRect, QSize
@@ -457,15 +457,20 @@ class FlowLayout(QLayout):
         self._do_layout(rect, False)
 
     def sizeHint(self):
-        return self.minimumSize()
+        w = 280
+        p = self.parentWidget()
+        if p and p.width() > 50:
+            w = p.width()
+        h = self.heightForWidth(w)
+        return QSize(w, max(26, h))
 
     def minimumSize(self):
-        size = QSize()
-        for item in self._item_list:
-            size = size.expandedTo(item.minimumSize())
-        margins = self.contentsMargins()
-        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
-        return size
+        w = 280
+        p = self.parentWidget()
+        if p and p.width() > 50:
+            w = p.width()
+        h = self.heightForWidth(w)
+        return QSize(60, max(24, h))
 
     def _do_layout(self, rect, test_only):
         left, top, right, bottom = self.getContentsMargins()
@@ -504,6 +509,7 @@ class QuickActionsToolbar(QWidget):
     Mini toolbar hosted directly below the Viewport resize handle.
     Displays configured quick shortcut buttons in an auto-wrapping flow layout
     so buttons are neatly aligned, never clipped, and wrap to new lines smoothly.
+    Supports user-adjustable height and button sizing.
     """
     action_triggered = pyqtSignal(str)
     settings_requested = pyqtSignal()
@@ -512,21 +518,54 @@ class QuickActionsToolbar(QWidget):
         super().__init__(parent)
         self.docker = docker
         self.items = list(TOOLBAR_PRESETS["Artist Essentials"])
+        self._button_height = 26
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.flow_layout = FlowLayout(self, margin=2, h_spacing=3, v_spacing=3)
 
         # Config gear button
         self.btn_config = QPushButton("⚙")
-        self.btn_config.setFixedSize(20, 22)
-        self.btn_config.setToolTip("Customize Quick Actions Toolbar (add/remove shortcuts, change colors, presets)")
+        self.btn_config.setToolTip("Customize Quick Actions Toolbar (add/remove shortcuts, change colors, presets, adjust height)")
         self.btn_config.setStyleSheet(
-            "QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 3px; font-size: 11px; padding: 0; }"
+            "QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 4px; font-size: 11px; padding: 0; }"
             "QPushButton:hover { background: #334155; color: #38bdf8; border-color: #38bdf8; }"
         )
         self.btn_config.clicked.connect(self._open_customizer)
 
         self.rebuild_buttons()
+
+    @property
+    def button_height(self):
+        return getattr(self, "_button_height", 26)
+
+    @button_height.setter
+    def button_height(self, h):
+        self.set_button_height(h)
+
+    def set_button_height(self, h):
+        val = max(20, min(50, int(h)))
+        if val != getattr(self, "_button_height", 26):
+            self._button_height = val
+            self.rebuild_buttons()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        w = max(60, width)
+        return self.flow_layout.heightForWidth(w)
+
+    def sizeHint(self):
+        w = self.width() if self.width() > 50 else (self.parentWidget().width() if self.parentWidget() and self.parentWidget().width() > 50 else 280)
+        h = self.flow_layout.heightForWidth(w)
+        return QSize(w, max(h, self.button_height + 6))
+
+    def minimumSizeHint(self):
+        return self.sizeHint()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.updateGeometry()
 
     def set_items(self, items):
         self.items = list(items)
@@ -543,6 +582,11 @@ class QuickActionsToolbar(QWidget):
             if w and w is not self.btn_config:
                 w.deleteLater()
 
+        bh = getattr(self, "_button_height", 26)
+        font_size = max(9, min(12, int(bh * 0.40)))
+        pad_v = max(1, int((bh - font_size - 8) * 0.5))
+        self.btn_config.setFixedSize(max(20, bh - 4), bh)
+
         for item in self.items:
             action_id = item.get("action_id", "")
             cat = ACTION_CATALOG.get(action_id, {})
@@ -553,7 +597,7 @@ class QuickActionsToolbar(QWidget):
             fg_col = item.get("text_color") or cat.get("text_color", "#e2e8f0")
 
             btn = QPushButton(f"{icon} {label}".strip())
-            btn.setFixedHeight(22)
+            btn.setFixedHeight(bh)
             btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(f"""
@@ -561,10 +605,10 @@ class QuickActionsToolbar(QWidget):
                     background: {bg_col};
                     color: {fg_col};
                     border: 1px solid rgba(255, 255, 255, 0.18);
-                    border-radius: 3px;
-                    font-size: 10px;
+                    border-radius: 4px;
+                    font-size: {font_size}px;
                     font-weight: 600;
-                    padding: 2px 7px;
+                    padding: {pad_v}px 8px;
                 }}
                 QPushButton:hover {{
                     border-color: #38bdf8;
@@ -580,6 +624,9 @@ class QuickActionsToolbar(QWidget):
         # Place config gear button at end of flow
         self.flow_layout.addWidget(self.btn_config)
         self.updateGeometry()
+        p = self.parentWidget()
+        if p:
+            p.updateGeometry()
 
     def _trigger_action(self, action_id):
         self.action_triggered.emit(action_id)
@@ -693,11 +740,16 @@ class QuickActionsToolbar(QWidget):
             d._reset_obj_all()
 
     def _open_customizer(self):
-        dlg = QuickToolbarCustomizerDialog(self.items, parent=self)
+        dlg = QuickToolbarCustomizerDialog(self.items, button_height=self.button_height, parent=self)
         if dlg.exec_() == QDialog.Accepted:
             self.items = dlg.get_items()
+            self._button_height = dlg.get_button_height()
             self.rebuild_buttons()
             if self.docker:
+                if hasattr(self.docker, 'spin_qt_btn_height'):
+                    self.docker.spin_qt_btn_height.blockSignals(True)
+                    self.docker.spin_qt_btn_height.setValue(self._button_height)
+                    self.docker.spin_qt_btn_height.blockSignals(False)
                 self.docker._schedule_save()
 
 
@@ -711,11 +763,12 @@ class QuickToolbarCustomizerDialog(QDialog):
     - Custom label, icon, background color
     - Select built-in preset propositions
     - Save/delete user presets
+    - Adjust button height
     """
-    def __init__(self, current_items, parent=None):
+    def __init__(self, current_items, button_height=26, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Customize Quick Actions Toolbar")
-        self.resize(520, 440)
+        self.resize(540, 480)
         self.setStyleSheet("""
             QDialog { background: #181b22; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; }
             QLabel { font-size: 10px; color: #cbd5e1; }
@@ -761,6 +814,19 @@ class QuickToolbarCustomizerDialog(QDialog):
         btn_del_p.clicked.connect(self._delete_preset)
         pr_box.addWidget(btn_del_p)
         layout.addLayout(pr_box)
+
+        # Button Height Control
+        ht_box = QHBoxLayout()
+        ht_box.addWidget(QLabel("Toolbar Button Height:"))
+        self.spin_btn_height = QSpinBox()
+        self.spin_btn_height.setRange(20, 50)
+        self.spin_btn_height.setValue(self.button_height)
+        self.spin_btn_height.setSuffix(" px")
+        self.spin_btn_height.setToolTip("Adjust toolbar button height (20px compact to 50px large)")
+        self.spin_btn_height.setStyleSheet("background:#11141a; color:#f1f5f9; border:1px solid #334155; padding:2px 6px; font-weight:bold;")
+        ht_box.addWidget(self.spin_btn_height)
+        ht_box.addStretch(1)
+        layout.addLayout(ht_box)
 
         # Columns: Left = Active Toolbar Items, Right = Catalog of Available Actions
         cols = QHBoxLayout()
@@ -862,6 +928,9 @@ class QuickToolbarCustomizerDialog(QDialog):
 
     def get_items(self):
         return list(self.items)
+
+    def get_button_height(self):
+        return self.spin_btn_height.value()
 
     def _populate_presets_combo(self):
         self.combo_presets.blockSignals(True)

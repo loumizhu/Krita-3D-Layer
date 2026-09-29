@@ -1849,6 +1849,20 @@ class GroundCalibratorDialog(QDialog):
         top_bar.addStretch(1)
         layout.addLayout(top_bar)
 
+        # Pre-initialize status labels before calibrator_widget signals fire
+        self.lbl_guidance = QLabel("📐 Ready: Drag corner pins, horizon line, or center Gizmo to adjust perspective.")
+        self.lbl_guidance.setWordWrap(True)
+        self.lbl_guidance.setStyleSheet(
+            "font-family:'Segoe UI'; font-size:11px; color:#38bdf8; "
+            "background:#0f172a; padding:6px 10px; border-radius:4px; border:1px solid #1e293b;"
+        )
+
+        self.lbl_stats = QLabel("Solving...")
+        self.lbl_stats.setStyleSheet(
+            "font-family:'Consolas', monospace; font-size:11px; color:#38bdf8; "
+            "background:#12141a; padding:6px 10px; border-radius:4px; border:1px solid #1e293b;"
+        )
+
         # Interactive Canvas Widget
         self.calibrator_widget = GroundCalibratorWidget(
             bg_image=bg_image,
@@ -1873,21 +1887,8 @@ class GroundCalibratorDialog(QDialog):
             cur_prim_clean = cur_prim_text.split()[-1]
         self.calibrator_widget.set_primitive_type(cur_prim_clean)
 
-        # Status / Guidance bar
-        self.lbl_guidance = QLabel("📐 Ready: Drag corner pins, horizon line, or center Gizmo to adjust perspective.")
-        self.lbl_guidance.setWordWrap(True)
-        self.lbl_guidance.setStyleSheet(
-            "font-family:'Segoe UI'; font-size:11px; color:#38bdf8; "
-            "background:#0f172a; padding:6px 10px; border-radius:4px; border:1px solid #1e293b;"
-        )
+        # Add status & stats labels to layout below canvas
         layout.addWidget(self.lbl_guidance)
-
-        # Solved Parameters readout bar
-        self.lbl_stats = QLabel("Solving...")
-        self.lbl_stats.setStyleSheet(
-            "font-family:'Consolas', monospace; font-size:11px; color:#38bdf8; "
-            "background:#12141a; padding:6px 10px; border-radius:4px; border:1px solid #1e293b;"
-        )
         layout.addWidget(self.lbl_stats)
 
         # Bottom Action Bar
@@ -2038,6 +2039,8 @@ class GroundCalibratorDialog(QDialog):
         self.calibrator_widget.update()
 
     def _set_guidance(self, text, level="info"):
+        if not hasattr(self, 'lbl_guidance') or self.lbl_guidance is None:
+            return
         level_styles = {
             "info":    "color:#38bdf8; background:#0f172a; border:1px solid #1e293b;",
             "warn":    "color:#facc15; background:#2d2006; border:1px solid #854d0e; font-weight:bold;",
@@ -2051,6 +2054,8 @@ class GroundCalibratorDialog(QDialog):
         self.lbl_guidance.setText(text)
 
     def _on_solution_changed(self, sol):
+        if not hasattr(self, 'lbl_stats') or self.lbl_stats is None:
+            return
         yaw = sol.get("yaw", 180.0)
         pitch = sol.get("pitch", 15.0)
         roll = sol.get("roll", 0.0)

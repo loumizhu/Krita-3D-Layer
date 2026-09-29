@@ -24,6 +24,7 @@ from .renderer import (
 from .primitive_drawer import (
     create_box_primitive, create_cylinder_primitive, create_sphere_primitive,
     create_pyramid_primitive, create_cone_primitive, create_plane_primitive,
+    create_room_primitive,
     add_primitive_to_history, load_primitive_history, clear_primitive_history
 )
 
@@ -60,6 +61,19 @@ def segments_intersect(p1, p2, p3, p4):
     def ccw(a, b, c):
         return (c.y() - a.y()) * (b.x() - a.x()) > (b.y() - a.y()) * (c.x() - a.x())
     return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
+
+
+def pt_dist_to_segment(p, a, b):
+    """Calculates perpendicular pixel distance from 2D point p to segment a-b."""
+    abx = b.x() - a.x()
+    aby = b.y() - a.y()
+    l2 = abx * abx + aby * aby
+    if l2 < 1e-6:
+        return math.hypot(p.x() - a.x(), p.y() - a.y())
+    t = max(0.0, min(1.0, ((p.x() - a.x()) * abx + (p.y() - a.y()) * aby) / l2))
+    proj_x = a.x() + t * abx
+    proj_y = a.y() + t * aby
+    return math.hypot(p.x() - proj_x, p.y() - proj_y)
 
 
 def validate_ground_quad(p0, p1, p2, p3):
@@ -586,6 +600,7 @@ class GroundCalibratorWidget(QWidget):
     """
     solution_changed = pyqtSignal(dict)
     guidance_changed = pyqtSignal(str, str)
+    gizmo_mode_changed = pyqtSignal(str)
 
     HANDLE_RADIUS = 8
 
@@ -622,7 +637,7 @@ class GroundCalibratorWidget(QWidget):
             self.primitive_type = self.mesh.primitive_type
         elif self.mesh and getattr(self.mesh, 'vertices', None):
             self.primitive_type = "Loaded 3D Model"
-        self.has_height_point = (self.primitive_type in ("Box", "Cylinder", "Pyramid", "Cone"))
+        self.has_height_point = (self.primitive_type in ("Box", "Cylinder", "Pyramid", "Cone", "Room", "Room (3 Planes)"))
         self.aspect_preset = "Free"
 
         # Horizon interaction
@@ -630,15 +645,16 @@ class GroundCalibratorWidget(QWidget):
         self.hover_horizon = False
         self.drag_start_pitch = 15.0
 
-        # Transform Gizmo & Quad dragging (Move, Rotate, Scale)
-        self.active_gizmo_action = None  # None, 'move', 'rotate', 'scale'
-        self.hover_gizmo_part = None     # None, 'move', 'rotate', 'scale', 'inside_quad'
+        # 3D Blender-Style Transform Gizmo
+        self.gizmo_mode = 'all'          # 'all' (combined), 'move', 'rotate', 'scale'
+        self.active_gizmo_part = None    # 'trans_x', 'trans_y', 'trans_z', 'plane_xy', 'plane_xz', 'plane_yz', 'center',
+                                         # 'rot_z', 'rot_x', 'rot_y', 'rot_view',
+                                         # 'scale_x', 'scale_y', 'scale_z', 'scale_uniform'
+        self.hover_gizmo_part = None
         self.drag_start_mouse_pos = None
-        self.drag_start_quad_pts = []
-        self.drag_start_height_pt = None
-        self.drag_start_center_norm = None
-        self.drag_start_dist = 1.0
+        self.drag_start_obj_state = {}
         self.drag_start_angle = 0.0
+        self.drag_start_dist = 1.0
 
         # Current image rect within widget (for letterbox/aspect mapping)
         self.img_rect = QRectF(0, 0, 480, 360)
@@ -651,133 +667,311 @@ class GroundCalibratorWidget(QWidget):
         self._recalculate()
 
     def set_primitive_type(self, ptype):
-        """Sets active 3D primitive type, ground rectangle, or loaded model."""
+        """Sets active primitive type (e.g. 'Box', 'Cylinder', 'Ground Rectangle', 'Loaded 3D Model', 'Room')."""
         self.primitive_type = ptype
-        if ptype in ("Box", "Cylinder", "Pyramid", "Cone"):
-            self.has_height_point = True
-            corners_3d = self.last_solution.get("corners_3d")
-            base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
-            rh = self.last_solution.get("rect_height", 2.0)
-            doc_w, doc_h = self._get_doc_size()
-            self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
-        else:
-            self.has_height_point = False
-            self.height_norm_pt = None
+        self.has_height_point = (ptype in ("Box", "Cylinder", "Pyramid", "Cone", "Room", "Room (3 Planes)"))
         self._recalculate()
         self.update()
 
-    def set_aspect_preset(self, preset_name):
-        """Sets aspect ratio proportions for the ground rectangle & height."""
-        self.aspect_preset = preset_name
-        if preset_name == "Free":
-            self.update()
-            return
-        rw = self.last_solution.get("rect_width", 2.0)
-        rd = self.last_solution.get("rect_depth", 2.0)
-        base_size = max(0.5, (rw + rd) * 0.5)
-
-        if preset_name == "1:1:1 Cube":
-            rh = base_size
-        elif preset_name == "1:2:1 Standing Block":
-            rh = base_size * 2.0
-        elif preset_name == "1:3:1 Human / Character":
-            rh = base_size * 3.0
-        elif preset_name == "2:1:3 Room / Interior":
-            rh = base_size * 0.5
-        elif preset_name == "4:1:4 Wide Stage":
-            rh = base_size * 0.25
+    def set_gizmo_mode(self, mode):
+        """Sets active 3D gizmo mode: 'all' (combined), 'move', 'rotate', 'scale'."""
+        self.gizmo_mode = mode
+        if mode == 'move':
+            self.guidance_changed.emit("✥ 3D Move Mode (G): Drag Red [X], Green [Y/Depth], or Blue [Z/Up] arrows to reposition 3D object.", "info")
+        elif mode == 'rotate':
+            self.guidance_changed.emit("⟳ 3D Rotate Mode (R): Drag Blue track (Yaw around Ground Up), Red track (Pitch), or Green track (Roll).", "info")
+        elif mode == 'scale':
+            self.guidance_changed.emit("⤢ 3D Scale Mode (S): Drag Red (Width), Green (Depth), or Blue (Height) cube handles.", "info")
         else:
-            rh = base_size
-
-        self.last_solution["rect_height"] = rh
-        corners_3d = self.last_solution.get("corners_3d")
-        base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
-        doc_w, doc_h = self._get_doc_size()
-        self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
-        self.has_height_point = True
-        self._recalculate()
+            self.guidance_changed.emit("⚙ 3D Transform Gizmo (Blender style): Manipulate 3D object with 3 axes. 4 ground points adapt automatically.", "info")
+        self.gizmo_mode_changed.emit(mode)
         self.update()
 
-    def _get_horizon_endpoints(self):
-        """Returns (p1, p2) representing the visible horizon line across the widget."""
+    def _compute_3d_gizmo_geometry(self):
+        """
+        Computes 3D coordinates and 2D projected screen coordinates for all
+        Blender-style transform gizmo handles (axes, arrows, rings, planes, cubes).
+        """
         sol = self.last_solution
-        vp1_doc = sol.get("vp1")
-        vp2_doc = sol.get("vp2")
-        w = float(self.width())
-        h = float(self.height())
-        if vp1_doc and vp2_doc:
-            vp1_w = self._doc_to_widget(vp1_doc)
-            vp2_w = self._doc_to_widget(vp2_doc)
-            dx = vp2_w.x() - vp1_w.x()
-            dy = vp2_w.y() - vp1_w.y()
-            if abs(dx) > 1e-4 or abs(dy) > 1e-4:
-                length = math.hypot(dx, dy)
-                scale = max(w, h) * 4.0 / max(1.0, length)
-                h_p1 = QPointF(vp1_w.x() - dx * scale, vp1_w.y() - dy * scale)
-                h_p2 = QPointF(vp2_w.x() + dx * scale, vp2_w.y() + dy * scale)
-                return h_p1, h_p2
-        # Fallback horizontal line across image rect at solved eye-level
+        if not sol or not self.camera:
+            return None
+
         doc_w, doc_h = self._get_doc_size()
-        cy = doc_h * 0.5
-        cur_fov = self.camera.fov if self.camera else 45.0
-        pitch = sol.get("pitch", 15.0)
-        f = (min(doc_w, doc_h) * 0.5) / math.tan(math.radians(max(5.0, min(160.0, cur_fov)) * 0.5))
-        y_doc = cy - f * math.tan(math.radians(pitch))
-        yw = self._doc_to_widget(QPointF(0, y_doc)).y()
-        return QPointF(0, yw), QPointF(w, yw)
+        render_size = min(doc_w, doc_h)
+        offset_x = (doc_w - render_size) * 0.5
+        offset_y = (doc_h - render_size) * 0.5
+        _, view_mat, _ = self.camera.get_matrices(render_size, render_size)
 
-    def _distance_to_horizon(self, pt):
-        """Calculates perpendicular pixel distance from point to the horizon line."""
-        p1, p2 = self._get_horizon_endpoints()
-        dx = p2.x() - p1.x()
-        dy = p2.y() - p1.y()
-        denom = math.hypot(dx, dy)
-        if denom < 1e-4:
-            return 9999.0
-        numer = abs(dy * pt.x() - dx * pt.y() + p2.x() * p1.y() - p2.y() * p1.x())
-        return numer / denom
+        tx = sol.get("target_x", 0.0)
+        ty = sol.get("target_y", 0.0)
+        tz = sol.get("target_z", 0.0)
+        rw = sol.get("rect_width", 2.0)
+        rd = sol.get("rect_depth", 2.0)
+        rh = sol.get("rect_height", 2.0)
+        yaw = sol.get("yaw", 180.0)
 
-    def _get_gizmo_parts(self):
+        origin_doc, _ = project_camera_point(self.camera, view_mat, tx, ty, tz, render_size, offset_x, offset_y)
+        if not origin_doc:
+            return None
+        origin_w = self._doc_to_widget(origin_doc)
+
+        r_yaw = math.radians(yaw)
+        cos_y = math.cos(r_yaw)
+        sin_y = math.sin(r_yaw)
+
+        axis_x_3d = QVector3D(cos_y, 0, -sin_y)
+        axis_y_3d = QVector3D(sin_y, 0, cos_y)
+        axis_z_3d = QVector3D(0, 1, 0)
+
+        arm_len = max(0.5, min(rw, rd) * 0.6)
+        pt_x_doc, _ = project_camera_point(self.camera, view_mat, tx + axis_x_3d.x() * arm_len, ty + axis_x_3d.y() * arm_len, tz + axis_x_3d.z() * arm_len, render_size, offset_x, offset_y)
+        pt_y_doc, _ = project_camera_point(self.camera, view_mat, tx + axis_y_3d.x() * arm_len, ty + axis_y_3d.y() * arm_len, tz + axis_y_3d.z() * arm_len, render_size, offset_x, offset_y)
+        pt_z_doc, _ = project_camera_point(self.camera, view_mat, tx + axis_z_3d.x() * arm_len, ty + axis_z_3d.y() * arm_len, tz + axis_z_3d.z() * arm_len, render_size, offset_x, offset_y)
+
+        if not pt_x_doc or not pt_y_doc or not pt_z_doc:
+            return None
+
+        pt_x_w = self._doc_to_widget(pt_x_doc)
+        pt_y_w = self._doc_to_widget(pt_y_doc)
+        pt_z_w = self._doc_to_widget(pt_z_doc)
+
+        def norm_vec(p1, p0):
+            dx = p1.x() - p0.x()
+            dy = p1.y() - p0.y()
+            l = math.hypot(dx, dy)
+            if l < 1e-4:
+                return QPointF(1, 0)
+            return QPointF(dx / l, dy / l)
+
+        dir_x = norm_vec(pt_x_w, origin_w)
+        dir_y = norm_vec(pt_y_w, origin_w)
+        dir_z = norm_vec(pt_z_w, origin_w)
+
+        gizmo_radius = 70.0
+
+        tip_x = QPointF(origin_w.x() + dir_x.x() * gizmo_radius, origin_w.y() + dir_x.y() * gizmo_radius)
+        tip_y = QPointF(origin_w.x() + dir_y.x() * gizmo_radius, origin_w.y() + dir_y.y() * gizmo_radius)
+        tip_z = QPointF(origin_w.x() + dir_z.x() * gizmo_radius, origin_w.y() + dir_z.y() * gizmo_radius)
+
+        pl_dist = gizmo_radius * 0.44
+        plane_xy_pt = QPointF(origin_w.x() + (dir_x.x() + dir_y.x()) * pl_dist * 0.7, origin_w.y() + (dir_x.y() + dir_y.y()) * pl_dist * 0.7)
+        plane_xz_pt = QPointF(origin_w.x() + (dir_x.x() + dir_z.x()) * pl_dist * 0.7, origin_w.y() + (dir_x.y() + dir_z.y()) * pl_dist * 0.7)
+        plane_yz_pt = QPointF(origin_w.x() + (dir_y.x() + dir_z.x()) * pl_dist * 0.7, origin_w.y() + (dir_y.y() + dir_z.y()) * pl_dist * 0.7)
+
+        rot_pts_z = []
+        rot_pts_x = []
+        rot_pts_y = []
+        r_3d = max(0.4, min(rw, rd) * 0.65)
+        for step in range(33):
+            phi = 2.0 * math.pi * step / 32.0
+            cp = math.cos(phi)
+            sp = math.sin(phi)
+            p_z_3d = QVector3D(tx + (axis_x_3d.x() * cp + axis_y_3d.x() * sp) * r_3d,
+                               ty,
+                               tz + (axis_x_3d.z() * cp + axis_y_3d.z() * sp) * r_3d)
+            p_z_doc, _ = project_camera_point(self.camera, view_mat, p_z_3d.x(), p_z_3d.y(), p_z_3d.z(), render_size, offset_x, offset_y)
+            if p_z_doc:
+                rot_pts_z.append(self._doc_to_widget(p_z_doc))
+
+            p_x_3d = QVector3D(tx + axis_y_3d.x() * sp * r_3d,
+                               ty + cp * r_3d,
+                               tz + axis_y_3d.z() * sp * r_3d)
+            p_x_doc, _ = project_camera_point(self.camera, view_mat, p_x_3d.x(), p_x_3d.y(), p_x_3d.z(), render_size, offset_x, offset_y)
+            if p_x_doc:
+                rot_pts_x.append(self._doc_to_widget(p_x_doc))
+
+            p_y_3d = QVector3D(tx + axis_x_3d.x() * cp * r_3d,
+                               ty + sp * r_3d,
+                               tz + axis_x_3d.z() * cp * r_3d)
+            p_y_doc, _ = project_camera_point(self.camera, view_mat, p_y_3d.x(), p_y_3d.y(), p_y_3d.z(), render_size, offset_x, offset_y)
+            if p_y_doc:
+                rot_pts_y.append(self._doc_to_widget(p_y_doc))
+
+        return {
+            "origin_w": origin_w,
+            "dir_x": dir_x, "dir_y": dir_y, "dir_z": dir_z,
+            "tip_x": tip_x, "tip_y": tip_y, "tip_z": tip_z,
+            "axis_x_3d": axis_x_3d, "axis_y_3d": axis_y_3d, "axis_z_3d": axis_z_3d,
+            "plane_xy_pt": plane_xy_pt, "plane_xz_pt": plane_xz_pt, "plane_yz_pt": plane_yz_pt,
+            "rot_pts_z": rot_pts_z, "rot_pts_x": rot_pts_x, "rot_pts_y": rot_pts_y,
+            "gizmo_radius": gizmo_radius,
+            "center_rect": QRectF(origin_w.x() - 11, origin_w.y() - 11, 22, 22)
+        }
+
+    def _hit_test_3d_gizmo(self, pos):
         """
-        Returns geometry of the on-screen transform gizmo at the quad center:
-        (c_w, move_rect, rot_pt, scale_pt)
+        Hit-tests mouse position against all 3D Blender-style gizmo elements.
+        Returns the hit element key or None.
         """
+        geom = self._compute_3d_gizmo_geometry()
+        if not geom:
+            return None
+
+        o = geom["origin_w"]
+        p = QPointF(pos)
+
+        # Center disc (View-plane move / uniform scale)
+        if math.hypot(p.x() - o.x(), p.y() - o.y()) <= 13.0:
+            return "center"
+
+        mode = getattr(self, "gizmo_mode", "all")
+
+        # 1. Translation / Scale tip handles
+        if mode in ("move", "all"):
+            if math.hypot(p.x() - geom["plane_xy_pt"].x(), p.y() - geom["plane_xy_pt"].y()) <= 12.0:
+                return "plane_xy"
+            if math.hypot(p.x() - geom["plane_xz_pt"].x(), p.y() - geom["plane_xz_pt"].y()) <= 12.0:
+                return "plane_xz"
+            if math.hypot(p.x() - geom["plane_yz_pt"].x(), p.y() - geom["plane_yz_pt"].y()) <= 12.0:
+                return "plane_yz"
+
+            if math.hypot(p.x() - geom["tip_x"].x(), p.y() - geom["tip_x"].y()) <= 14.0 or pt_dist_to_segment(p, o, geom["tip_x"]) <= 6.0:
+                return "trans_x"
+            if math.hypot(p.x() - geom["tip_y"].x(), p.y() - geom["tip_y"].y()) <= 14.0 or pt_dist_to_segment(p, o, geom["tip_y"]) <= 6.0:
+                return "trans_y"
+            if math.hypot(p.x() - geom["tip_z"].x(), p.y() - geom["tip_z"].y()) <= 14.0 or pt_dist_to_segment(p, o, geom["tip_z"]) <= 6.0:
+                return "trans_z"
+
+        if mode == "scale":
+            if math.hypot(p.x() - geom["tip_x"].x(), p.y() - geom["tip_x"].y()) <= 14.0:
+                return "scale_x"
+            if math.hypot(p.x() - geom["tip_y"].x(), p.y() - geom["tip_y"].y()) <= 14.0:
+                return "scale_y"
+            if math.hypot(p.x() - geom["tip_z"].x(), p.y() - geom["tip_z"].y()) <= 14.0:
+                return "scale_z"
+
+        # 2. Rotation rings
+        if mode in ("rotate", "all"):
+            # Blue Yaw ring (around ground up)
+            pts_z = geom.get("rot_pts_z", [])
+            for i in range(len(pts_z) - 1):
+                if pt_dist_to_segment(p, pts_z[i], pts_z[i+1]) <= 7.0:
+                    return "rot_z"
+
+            if mode == "rotate":
+                pts_x = geom.get("rot_pts_x", [])
+                for i in range(len(pts_x) - 1):
+                    if pt_dist_to_segment(p, pts_x[i], pts_x[i+1]) <= 7.0:
+                        return "rot_x"
+
+                pts_y = geom.get("rot_pts_y", [])
+                for i in range(len(pts_y) - 1):
+                    if pt_dist_to_segment(p, pts_y[i], pts_y[i+1]) <= 7.0:
+                        return "rot_y"
+
+                # Outer view ring
+                dist_o = math.hypot(p.x() - o.x(), p.y() - o.y())
+                if abs(dist_o - geom["gizmo_radius"] * 1.25) <= 7.0:
+                    return "rot_view"
+
+        return None
+
+    def _start_3d_gizmo_action(self, part, pos):
+        """Initiates an interactive 3D transformation on the 3D object."""
+        self.active_gizmo_part = part
+        self.drag_start_mouse_pos = QPointF(pos)
         sol = self.last_solution
-        c_doc = sol.get("center_2d")
-        if not c_doc:
-            doc_pts = self._get_doc_points()
-            c_doc = QPointF(sum(p.x() for p in doc_pts) * 0.25, sum(p.y() for p in doc_pts) * 0.25)
-        c_w = self._doc_to_widget(c_doc)
+        self.drag_start_obj_state = {
+            "tx": sol.get("target_x", 0.0),
+            "ty": sol.get("target_y", 0.0),
+            "tz": sol.get("target_z", 0.0),
+            "rw": sol.get("rect_width", 2.0),
+            "rd": sol.get("rect_depth", 2.0),
+            "rh": sol.get("rect_height", 2.0),
+            "yaw": sol.get("yaw", 180.0),
+            "pitch": sol.get("pitch", 15.0),
+            "roll": sol.get("roll", 0.0),
+        }
+        geom = self._compute_3d_gizmo_geometry()
+        o = geom["origin_w"] if geom else pos
+        self.drag_start_angle = math.atan2(pos.y() - o.y(), pos.x() - o.x())
+        self.drag_start_dist = max(10.0, math.hypot(pos.x() - o.x(), pos.y() - o.y()))
 
-        move_rect = QRectF(c_w.x() - 13, c_w.y() - 13, 26, 26)
-        rot_pt = QPointF(c_w.x(), c_w.y() - 38)
-        scale_pt = QPointF(c_w.x() + 38, c_w.y())
-        return c_w, move_rect, rot_pt, scale_pt
-
-    def _start_gizmo_action(self, action, mouse_pos, c_w):
-        """Initiates an interactive Move, Rotate, or Scale transformation."""
-        self.active_gizmo_action = action
-        self.drag_start_mouse_pos = QPointF(mouse_pos)
-        self.drag_start_quad_pts = [QPointF(p) for p in self.norm_points]
-        self.drag_start_height_pt = QPointF(self.height_norm_pt) if self.height_norm_pt else None
-
-        pts = self.norm_points
-        self.drag_start_center_norm = QPointF(
-            sum(p.x() for p in pts) * 0.25,
-            sum(p.y() for p in pts) * 0.25
-        )
-        self.drag_start_dist = max(10.0, math.hypot(mouse_pos.x() - c_w.x(), mouse_pos.y() - c_w.y()))
-        self.drag_start_angle = math.atan2(mouse_pos.y() - c_w.y(), mouse_pos.x() - c_w.x())
-
-        if action == 'move':
-            self.guidance_changed.emit("✥ Moving Ground Rectangle: Drag to reposition on canvas.", "info")
+        if "trans" in part or part == "center":
             self.setCursor(Qt.SizeAllCursor)
-        elif action == 'scale':
-            self.guidance_changed.emit("⤢ Scaling Ground Rectangle: Drag outward to enlarge, inward to shrink.", "info")
-            self.setCursor(Qt.SizeFDiagCursor)
-        elif action == 'rotate':
-            self.guidance_changed.emit("⟳ Rotating Ground Rectangle: Drag around center to rotate yaw/orientation.", "info")
+            self.guidance_changed.emit(f"✥ Moving 3D Object along {part.upper()}: Drag across canvas. Pins adapt dynamically.", "info")
+        elif "rot" in part:
             self.setCursor(Qt.PointingHandCursor)
+            self.guidance_changed.emit(f"⟳ Rotating 3D Object: Drag around center. Ground corners follow model rotation.", "info")
+        elif "scale" in part:
+            self.setCursor(Qt.SizeFDiagCursor)
+            self.guidance_changed.emit(f"⤢ Scaling 3D Object: Drag outward/inward. Base rectangle resizes to match.", "info")
+        elif "plane" in part:
+            self.setCursor(Qt.SizeAllCursor)
+            self.guidance_changed.emit(f"✥ Sliding 3D Object on Ground Plane: Drag across ground. Pins adapt dynamically.", "info")
+
+    def _update_pins_from_3d_object(self):
+        """
+        Projects the 3D object's transformed base rectangle (and height) through
+        the camera onto the canvas, adapting the 4 ground corner pins and height pin.
+        """
+        sol = self.last_solution
+        if not sol or not self.camera:
+            return
+
+        tx = sol.get("target_x", 0.0)
+        ty = sol.get("target_y", 0.0)
+        tz = sol.get("target_z", 0.0)
+        rw = sol.get("rect_width", 2.0)
+        rd = sol.get("rect_depth", 2.0)
+        rh = sol.get("rect_height", 2.0)
+        yaw = sol.get("yaw", 180.0)
+        flip = getattr(self, "flip_yaw", False)
+
+        hw = rw * 0.5
+        hd = rd * 0.5
+
+        r_yaw = math.radians(yaw)
+        cos_y = math.cos(r_yaw)
+        sin_y = math.sin(r_yaw)
+
+        def rot_xz(lx, lz):
+            rx = lx * cos_y - lz * sin_y
+            rz = lx * sin_y + lz * cos_y
+            return tx + rx, tz + rz
+
+        if not flip:
+            c0_x, c0_z = rot_xz(hw, -hd)   # 1 FL
+            c1_x, c1_z = rot_xz(-hw, -hd)  # 2 FR
+            c2_x, c2_z = rot_xz(-hw, hd)   # 3 BR
+            c3_x, c3_z = rot_xz(hw, hd)    # 4 BL
+        else:
+            c0_x, c0_z = rot_xz(-hw, hd)
+            c1_x, c1_z = rot_xz(hw, hd)
+            c2_x, c2_z = rot_xz(hw, -hd)
+            c3_x, c3_z = rot_xz(-hw, -hd)
+
+        corners_3d = [
+            QVector3D(c0_x, ty, c0_z),
+            QVector3D(c1_x, ty, c1_z),
+            QVector3D(c2_x, ty, c2_z),
+            QVector3D(c3_x, ty, c3_z),
+        ]
+        sol["corners_3d"] = corners_3d
+
+        doc_w, doc_h = self._get_doc_size()
+        render_size = min(doc_w, doc_h)
+        offset_x = (doc_w - render_size) * 0.5
+        offset_y = (doc_h - render_size) * 0.5
+        _, view_mat, _ = self.camera.get_matrices(render_size, render_size)
+
+        new_norm_points = []
+        for c in corners_3d:
+            pt, _ = project_camera_point(self.camera, view_mat, c.x(), c.y(), c.z(),
+                                         render_size, offset_x, offset_y)
+            if pt:
+                new_norm_points.append(QPointF(max(0.001, min(0.999, pt.x() / doc_w)),
+                                               max(0.001, min(0.999, pt.y() / doc_h))))
+        if len(new_norm_points) == 4:
+            self.norm_points = new_norm_points
+
+        if getattr(self, 'has_height_point', False):
+            pt_top, _ = project_camera_point(self.camera, view_mat, corners_3d[0].x(), corners_3d[0].y() + rh, corners_3d[0].z(),
+                                             render_size, offset_x, offset_y)
+            if pt_top:
+                self.height_norm_pt = QPointF(max(0.001, min(0.999, pt_top.x() / doc_w)),
+                                              max(0.001, min(0.999, pt_top.y() / doc_h)))
+
 
     def _compute_initial_norm_points(self):
         doc_w, doc_h = self._get_doc_size()
@@ -1012,6 +1206,22 @@ class GroundCalibratorWidget(QWidget):
                 self.update()
                 event.accept()
                 return
+        elif event.key() in (Qt.Key_G, Qt.Key_G + 32):
+            self.set_gizmo_mode('move')
+            event.accept()
+            return
+        elif event.key() in (Qt.Key_R, Qt.Key_R + 32):
+            self.set_gizmo_mode('rotate')
+            event.accept()
+            return
+        elif event.key() in (Qt.Key_S, Qt.Key_S + 32):
+            self.set_gizmo_mode('scale')
+            event.accept()
+            return
+        elif event.key() in (Qt.Key_A, Qt.Key_A + 32):
+            self.set_gizmo_mode('all')
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
@@ -1068,38 +1278,24 @@ class GroundCalibratorWidget(QWidget):
                     event.accept()
                     return
 
-            # 4. Check On-Screen Transform Gizmo handles (Rotate ⟳, Scale ⤢, Move ✥)
-            c_w, move_rect, rot_pt, scale_pt = self._get_gizmo_parts()
-
-            # Rotate handle (⟳)
-            if (rot_pt - QPointF(pos)).manhattanLength() <= 14:
-                self._start_gizmo_action('rotate', pos, c_w)
+            # 4. Check 3D Blender-Style Transform Gizmo handles (Move, Rotate, Scale)
+            hit_part = self._hit_test_3d_gizmo(pos)
+            if hit_part:
+                self._start_3d_gizmo_action(hit_part, pos)
                 event.accept()
                 return
 
-            # Scale handle (⤢)
-            if (scale_pt - QPointF(pos)).manhattanLength() <= 14:
-                self._start_gizmo_action('scale', pos, c_w)
-                event.accept()
-                return
-
-            # Center Move handle (✥)
-            if (c_w - QPointF(pos)).manhattanLength() <= 15:
-                self._start_gizmo_action('move', pos, c_w)
-                event.accept()
-                return
-
-            # 5. Check Quad interior with modifier keys (Shift: Scale, Ctrl/Alt: Rotate, Normal: Move)
+            # 5. Check Quad interior with modifier keys (Shift: Scale, Ctrl/Alt: Rotate, Normal: Move Ground Plane)
             p0, p1, p2, p3 = pts[:4]
             quad_poly = QPolygonF([p0, p1, p2, p3])
             if quad_poly.containsPoint(pos, Qt.OddEvenFill):
                 mods = event.modifiers()
                 if mods & Qt.ShiftModifier:
-                    self._start_gizmo_action('scale', pos, c_w)
+                    self._start_3d_gizmo_action('scale_uniform', pos)
                 elif mods & (Qt.ControlModifier | Qt.AltModifier):
-                    self._start_gizmo_action('rotate', pos, c_w)
+                    self._start_3d_gizmo_action('rot_z', pos)
                 else:
-                    self._start_gizmo_action('move', pos, c_w)
+                    self._start_3d_gizmo_action('plane_xy', pos)
                 event.accept()
                 return
 
@@ -1196,65 +1392,127 @@ class GroundCalibratorWidget(QWidget):
             event.accept()
             return
 
-        # Gizmo Action Dragging (Move, Rotate, Scale)
-        if self.active_gizmo_action is not None and self.drag_start_mouse_pos:
-            c_w, _, _, _ = self._get_gizmo_parts()
-            c_norm = self.drag_start_center_norm
+        # 3D Blender-Style Gizmo Action Dragging
+        if getattr(self, 'active_gizmo_part', None) is not None and self.drag_start_mouse_pos:
+            part = self.active_gizmo_part
+            dx = pos.x() - self.drag_start_mouse_pos.x()
+            dy = pos.y() - self.drag_start_mouse_pos.y()
 
-            if self.active_gizmo_action == 'move':
-                p_curr_norm = self._widget_to_doc_norm(pos)
-                p_start_norm = self._widget_to_doc_norm(self.drag_start_mouse_pos)
-                dx = p_curr_norm.x() - p_start_norm.x()
-                dy = p_curr_norm.y() - p_start_norm.y()
-                self.norm_points = [
-                    QPointF(max(0.001, min(0.999, p.x() + dx)), max(0.001, min(0.999, p.y() + dy)))
-                    for p in self.drag_start_quad_pts
-                ]
-                if self.drag_start_height_pt:
-                    self.height_norm_pt = QPointF(
-                        max(0.001, min(0.999, self.drag_start_height_pt.x() + dx)),
-                        max(0.001, min(0.999, self.drag_start_height_pt.y() + dy))
-                    )
+            geom = self._compute_3d_gizmo_geometry()
+            sol = self.last_solution
+            st = self.drag_start_obj_state
+            if geom and sol and st:
+                doc_w, doc_h = self._get_doc_size()
+                render_size = min(doc_w, doc_h)
+                cam = self.camera
+                cur_dist = sol.get("distance", cam.distance if cam else 4.0)
+                cur_fov = sol.get("fov", cam.fov if cam else 45.0)
+                world_scale = (2.0 * cur_dist * math.tan(math.radians(max(5.0, min(160.0, cur_fov)) * 0.5))) / max(100.0, render_size)
+                scale_screen = doc_w / max(1.0, self.img_rect.width())
+                w_factor = world_scale * scale_screen
 
-            elif self.active_gizmo_action == 'scale':
-                dist_curr = math.hypot(pos.x() - c_w.x(), pos.y() - c_w.y())
-                s = max(0.1, min(10.0, dist_curr / max(10.0, self.drag_start_dist)))
-                self.norm_points = [
-                    QPointF(
-                        max(0.001, min(0.999, c_norm.x() + (p.x() - c_norm.x()) * s)),
-                        max(0.001, min(0.999, c_norm.y() + (p.y() - c_norm.y()) * s))
-                    )
-                    for p in self.drag_start_quad_pts
-                ]
-                if self.drag_start_height_pt:
-                    self.height_norm_pt = QPointF(
-                        max(0.001, min(0.999, c_norm.x() + (self.drag_start_height_pt.x() - c_norm.x()) * s)),
-                        max(0.001, min(0.999, c_norm.y() + (self.drag_start_height_pt.y() - c_norm.y()) * s))
-                    )
+                dir_x = geom["dir_x"]
+                dir_y = geom["dir_y"]
+                dir_z = geom["dir_z"]
+                ax_x = geom["axis_x_3d"]
+                ax_y = geom["axis_y_3d"]
 
-            elif self.active_gizmo_action == 'rotate':
-                ang_curr = math.atan2(pos.y() - c_w.y(), pos.x() - c_w.x())
-                ang_delta = ang_curr - self.drag_start_angle
-                cos_a = math.cos(ang_delta)
-                sin_a = math.sin(ang_delta)
+                # Translations
+                if part == 'trans_x':
+                    proj = dx * dir_x.x() + dy * dir_x.y()
+                    delta_w = proj * w_factor
+                    sol["target_x"] = st["tx"] + delta_w * ax_x.x()
+                    sol["target_z"] = st["tz"] + delta_w * ax_x.z()
+                    self.guidance_changed.emit(f"✥ Moving 3D Object [X]: Δ {delta_w:+.2f} (X: {sol['target_x']:.2f}, Z: {sol['target_z']:.2f})", "info")
+                elif part == 'trans_y':
+                    proj = dx * dir_y.x() + dy * dir_y.y()
+                    delta_w = proj * w_factor
+                    sol["target_x"] = st["tx"] + delta_w * ax_y.x()
+                    sol["target_z"] = st["tz"] + delta_w * ax_y.z()
+                    self.guidance_changed.emit(f"✥ Moving 3D Object [Y / Ground Depth]: Δ {delta_w:+.2f} (X: {sol['target_x']:.2f}, Z: {sol['target_z']:.2f})", "info")
+                elif part == 'trans_z':
+                    proj = dx * dir_z.x() + dy * dir_z.y()
+                    delta_w = proj * w_factor
+                    sol["target_y"] = st["ty"] + delta_w
+                    self.guidance_changed.emit(f"✥ Moving 3D Object [Z / Elevation Up]: Δ {delta_w:+.2f} (Height: {sol['target_y']:.2f})", "info")
+                elif part in ('plane_xy', 'center'):
+                    proj_x = dx * dir_x.x() + dy * dir_x.y()
+                    proj_y = dx * dir_y.x() + dy * dir_y.y()
+                    sol["target_x"] = st["tx"] + (proj_x * ax_x.x() + proj_y * ax_y.x()) * w_factor
+                    sol["target_z"] = st["tz"] + (proj_x * ax_x.z() + proj_y * ax_y.z()) * w_factor
+                    self.guidance_changed.emit(f"✥ Sliding 3D Object on Ground: (X: {sol['target_x']:.2f}, Z: {sol['target_z']:.2f})", "info")
+                elif part == 'plane_xz':
+                    proj_x = dx * dir_x.x() + dy * dir_x.y()
+                    proj_z = dx * dir_z.x() + dy * dir_z.y()
+                    sol["target_x"] = st["tx"] + proj_x * ax_x.x() * w_factor
+                    sol["target_z"] = st["tz"] + proj_x * ax_x.z() * w_factor
+                    sol["target_y"] = st["ty"] + proj_z * w_factor
+                    self.guidance_changed.emit(f"✥ Moving in XZ plane: (X: {sol['target_x']:.2f}, Y: {sol['target_y']:.2f})", "info")
+                elif part == 'plane_yz':
+                    proj_y = dx * dir_y.x() + dy * dir_y.y()
+                    proj_z = dx * dir_z.x() + dy * dir_z.y()
+                    sol["target_x"] = st["tx"] + proj_y * ax_y.x() * w_factor
+                    sol["target_z"] = st["tz"] + proj_y * ax_y.z() * w_factor
+                    sol["target_y"] = st["ty"] + proj_z * w_factor
+                    self.guidance_changed.emit(f"✥ Moving in YZ plane: (Y: {sol['target_y']:.2f}, Z: {sol['target_z']:.2f})", "info")
 
-                new_pts = []
-                for p in self.drag_start_quad_pts:
-                    ox = p.x() - c_norm.x()
-                    oy = p.y() - c_norm.y()
-                    rx = c_norm.x() + ox * cos_a - oy * sin_a
-                    ry = c_norm.y() + ox * sin_a + oy * cos_a
-                    new_pts.append(QPointF(max(0.001, min(0.999, rx)), max(0.001, min(0.999, ry))))
-                self.norm_points = new_pts
+                # Rotations
+                elif part in ('rot_z', 'rot_view'):
+                    o = geom["origin_w"]
+                    ang_curr = math.atan2(pos.y() - o.y(), pos.x() - o.x())
+                    ang_delta = math.degrees(ang_curr - self.drag_start_angle)
+                    new_yaw = (st["yaw"] + ang_delta) % 360.0
+                    sol["yaw"] = new_yaw
+                    self.guidance_changed.emit(f"⟳ Rotating Yaw (Ground Up): {new_yaw:.1f}° (Δ {ang_delta:+.1f}°)", "info")
+                elif part == 'rot_x':
+                    o = geom["origin_w"]
+                    ang_curr = math.atan2(pos.y() - o.y(), pos.x() - o.x())
+                    ang_delta = math.degrees(ang_curr - self.drag_start_angle)
+                    new_pitch = max(-85.0, min(85.0, st["pitch"] + ang_delta))
+                    sol["pitch"] = new_pitch
+                    self.guidance_changed.emit(f"⟳ Rotating Pitch: {new_pitch:.1f}°", "info")
+                elif part == 'rot_y':
+                    o = geom["origin_w"]
+                    ang_curr = math.atan2(pos.y() - o.y(), pos.x() - o.x())
+                    ang_delta = math.degrees(ang_curr - self.drag_start_angle)
+                    new_roll = max(-85.0, min(85.0, st["roll"] + ang_delta))
+                    sol["roll"] = new_roll
+                    self.guidance_changed.emit(f"⟳ Rotating Roll: {new_roll:.1f}°", "info")
 
-                if self.drag_start_height_pt:
-                    ox = self.drag_start_height_pt.x() - c_norm.x()
-                    oy = self.drag_start_height_pt.y() - c_norm.y()
-                    rx = c_norm.x() + ox * cos_a - oy * sin_a
-                    ry = c_norm.y() + ox * sin_a + oy * cos_a
-                    self.height_norm_pt = QPointF(max(0.001, min(0.999, rx)), max(0.001, min(0.999, ry)))
+                # Scales
+                elif part == 'scale_x':
+                    proj = dx * dir_x.x() + dy * dir_x.y()
+                    s = max(0.1, 1.0 + proj / 50.0)
+                    new_rw = max(0.2, min(50.0, st["rw"] * s))
+                    sol["rect_width"] = new_rw
+                    self.guidance_changed.emit(f"⤢ Scaling Width (X): {new_rw:.2f} (W {new_rw:.2f} × D {sol.get('rect_depth', 2.0):.2f})", "info")
+                elif part == 'scale_y':
+                    proj = dx * dir_y.x() + dy * dir_y.y()
+                    s = max(0.1, 1.0 + proj / 50.0)
+                    new_rd = max(0.2, min(50.0, st["rd"] * s))
+                    sol["rect_depth"] = new_rd
+                    self.guidance_changed.emit(f"⤢ Scaling Depth (Y): {new_rd:.2f} (W {sol.get('rect_width', 2.0):.2f} × D {new_rd:.2f})", "info")
+                elif part == 'scale_z':
+                    proj = dx * dir_z.x() + dy * dir_z.y()
+                    s = max(0.1, 1.0 + proj / 50.0)
+                    new_rh = max(0.2, min(50.0, st["rh"] * s))
+                    sol["rect_height"] = new_rh
+                    self.guidance_changed.emit(f"⤢ Scaling Height (Z): {new_rh:.2f} (Height: {new_rh:.2f})", "info")
+                elif part == 'scale_uniform':
+                    o = geom["origin_w"]
+                    dist_curr = math.hypot(pos.x() - o.x(), pos.y() - o.y())
+                    s = max(0.1, dist_curr / max(10.0, self.drag_start_dist))
+                    new_rw = max(0.2, min(50.0, st["rw"] * s))
+                    new_rd = max(0.2, min(50.0, st["rd"] * s))
+                    new_rh = max(0.2, min(50.0, st["rh"] * s))
+                    sol["rect_width"] = new_rw
+                    sol["rect_depth"] = new_rd
+                    sol["rect_height"] = new_rh
+                    self.guidance_changed.emit(f"⤢ Uniform Scaling: {s:.2f}× (W {new_rw:.2f} × D {new_rd:.2f} × H {new_rh:.2f})", "info")
 
-            self._recalculate()
+                # Project 3D object base corners onto 2D canvas pins!
+                self._update_pins_from_3d_object()
+
             self.update()
             event.accept()
             return
@@ -1279,7 +1537,6 @@ class GroundCalibratorWidget(QWidget):
 
         # Passive Hover State Detection
         pts = self._get_widget_points()
-        old_h = self.hovered_handle
         self.hovered_handle = None
         for idx, pt in enumerate(pts):
             dist = (pt - QPointF(pos)).manhattanLength()
@@ -1291,46 +1548,57 @@ class GroundCalibratorWidget(QWidget):
                 break
 
         if self.hovered_handle is None:
-            c_w, move_rect, rot_pt, scale_pt = self._get_gizmo_parts()
-            if (rot_pt - QPointF(pos)).manhattanLength() <= 14:
-                self.hover_gizmo_part = 'rotate'
+            hit_part = self._hit_test_3d_gizmo(pos)
+            if hit_part:
+                self.hover_gizmo_part = hit_part
                 self.hover_horizon = False
-                self.setCursor(Qt.PointingHandCursor)
-                self.guidance_changed.emit("⟳ Gizmo Rotate: Drag around center to rotate ground rectangle.", "info")
-            elif (scale_pt - QPointF(pos)).manhattanLength() <= 14:
-                self.hover_gizmo_part = 'scale'
-                self.hover_horizon = False
-                self.setCursor(Qt.SizeFDiagCursor)
-                self.guidance_changed.emit("⤢ Gizmo Scale: Drag outward/inward to scale ground rectangle.", "info")
-            elif (c_w - QPointF(pos)).manhattanLength() <= 15:
-                self.hover_gizmo_part = 'move'
-                self.hover_horizon = False
-                self.setCursor(Qt.SizeAllCursor)
-                self.guidance_changed.emit("✥ Gizmo Move: Drag to translate ground rectangle on canvas.", "info")
+                if "trans" in hit_part or hit_part in ("center", "plane_xy", "plane_xz", "plane_yz"):
+                    self.setCursor(Qt.SizeAllCursor)
+                    if hit_part == "trans_x":
+                        self.guidance_changed.emit("✥ 3D Axis [X Red]: Drag to move model laterally along ground.", "info")
+                    elif hit_part == "trans_y":
+                        self.guidance_changed.emit("✥ 3D Axis [Y Green]: Drag to move model in depth along ground.", "info")
+                    elif hit_part == "trans_z":
+                        self.guidance_changed.emit("✥ 3D Axis [Z Blue]: Drag to move model vertically Up/Down.", "info")
+                    elif hit_part == "plane_xy":
+                        self.guidance_changed.emit("✥ Ground Plane Slider: Drag to slide 3D model freely on ground plane.", "info")
+                    else:
+                        self.guidance_changed.emit("✥ Center Disc: Drag to move 3D model in view plane.", "info")
+                elif "rot" in hit_part:
+                    self.setCursor(Qt.PointingHandCursor)
+                    if hit_part == "rot_z":
+                        self.guidance_changed.emit("⟳ Blue Yaw Ring: Drag around center to rotate 3D object on ground.", "info")
+                    elif hit_part == "rot_x":
+                        self.guidance_changed.emit("⟳ Red Pitch Ring: Drag to tilt 3D object forward/backward.", "info")
+                    elif hit_part == "rot_y":
+                        self.guidance_changed.emit("⟳ Green Roll Ring: Drag to roll 3D object side to side.", "info")
+                    else:
+                        self.guidance_changed.emit("⟳ View Ring: Drag to rotate view-aligned roll.", "info")
+                elif "scale" in hit_part:
+                    self.setCursor(Qt.SizeFDiagCursor)
+                    self.guidance_changed.emit("⤢ Scale Handle: Drag to scale 3D object dimension.", "info")
             else:
+                self.hover_gizmo_part = None
                 p0, p1, p2, p3 = pts[:4]
                 quad_poly = QPolygonF([p0, p1, p2, p3])
                 if quad_poly.containsPoint(pos, Qt.OddEvenFill):
-                    self.hover_gizmo_part = 'inside_quad'
                     self.hover_horizon = False
                     mods = event.modifiers()
                     if mods & Qt.ShiftModifier:
                         self.setCursor(Qt.SizeFDiagCursor)
-                        self.guidance_changed.emit("⤢ Shift+Drag inside quad: Scale ground rectangle.", "info")
+                        self.guidance_changed.emit("⤢ Shift+Drag inside: Uniform Scale 3D Object.", "info")
                     elif mods & (Qt.ControlModifier | Qt.AltModifier):
                         self.setCursor(Qt.PointingHandCursor)
-                        self.guidance_changed.emit("⟳ Ctrl+Drag inside quad: Rotate ground rectangle.", "info")
+                        self.guidance_changed.emit("⟳ Ctrl+Drag inside: Rotate 3D Object (Yaw).", "info")
                     else:
                         self.setCursor(Qt.SizeAllCursor)
-                        self.guidance_changed.emit("✥ Drag inside quad: Move  |  Shift+Drag: Scale  |  Ctrl+Drag: Rotate", "info")
+                        self.guidance_changed.emit("✥ Drag inside: Slide on ground  |  Shift+Drag: Scale  |  Ctrl+Drag: Rotate", "info")
                 elif self._distance_to_horizon(pos) <= 8.0:
                     self.hover_horizon = True
-                    self.hover_gizmo_part = None
                     self.setCursor(Qt.SizeVerCursor)
                     self.guidance_changed.emit("↕ Horizon Line: Drag up or down to tilt camera eye-level.", "info")
                 else:
                     self.hover_horizon = False
-                    self.hover_gizmo_part = None
                     if not self.is_drag_mode and not self.is_picking_mode:
                         self.setCursor(Qt.ArrowCursor)
 
@@ -1353,10 +1621,12 @@ class GroundCalibratorWidget(QWidget):
             event.accept()
             return
 
-        if self.active_gizmo_action is not None:
-            self.active_gizmo_action = None
+        if getattr(self, 'active_gizmo_part', None) is not None:
+            self.active_gizmo_part = None
             self.drag_start_mouse_pos = None
+            self.drag_start_obj_state = {}
             self.update()
+            self._recalculate()
             event.accept()
             return
 
@@ -1368,6 +1638,176 @@ class GroundCalibratorWidget(QWidget):
             return
 
         super().mouseReleaseEvent(event)
+
+    def _paint_3d_blender_gizmo(self, painter):
+        """
+        Renders a Blender-style 3D Transform Gizmo directly at the 3D object center/base,
+        with 3 colored axes (Red X, Green Y/Depth, Blue Z/Height Up), arrowheads,
+        plane sliders, and 3D elliptical rotation tracks.
+        """
+        geom = self._compute_3d_gizmo_geometry()
+        if not geom:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        o = geom["origin_w"]
+        tip_x = geom["tip_x"]
+        tip_y = geom["tip_y"]
+        tip_z = geom["tip_z"]
+        dir_x = geom["dir_x"]
+        dir_y = geom["dir_y"]
+        dir_z = geom["dir_z"]
+
+        mode = getattr(self, "gizmo_mode", "all")
+        active_part = getattr(self, "active_gizmo_part", None)
+        hover_part = getattr(self, "hover_gizmo_part", None)
+
+        col_x = QColor(239, 68, 68)    # Red (X - Width)
+        col_y = QColor(34, 197, 94)    # Green (Y - Ground Depth)
+        col_z = QColor(59, 130, 246)   # Blue (Z - Height Up)
+        col_hi = QColor(255, 255, 255) # Hover/Active glow
+
+        # 1. 3D Rotation Rings (drawn under axes)
+        if mode in ("rotate", "all"):
+            # Blue Yaw Ring (Ground Plane Up)
+            pts_z = geom.get("rot_pts_z", [])
+            if len(pts_z) >= 2:
+                is_act_rz = (active_part == 'rot_z' or hover_part == 'rot_z')
+                pen_rz = QPen(col_hi if is_act_rz else QColor(59, 130, 246, 210), 3.0 if is_act_rz else 1.8)
+                painter.setPen(pen_rz)
+                painter.drawPolyline(QPolygonF(pts_z))
+
+            if mode == "rotate":
+                # Red Pitch Ring
+                pts_x = geom.get("rot_pts_x", [])
+                if len(pts_x) >= 2:
+                    is_act_rx = (active_part == 'rot_x' or hover_part == 'rot_x')
+                    pen_rx = QPen(col_hi if is_act_rx else QColor(239, 68, 68, 180), 3.0 if is_act_rx else 1.6)
+                    painter.setPen(pen_rx)
+                    painter.drawPolyline(QPolygonF(pts_x))
+
+                # Green Roll Ring
+                pts_y = geom.get("rot_pts_y", [])
+                if len(pts_y) >= 2:
+                    is_act_ry = (active_part == 'rot_y' or hover_part == 'rot_y')
+                    pen_ry = QPen(col_hi if is_act_ry else QColor(34, 197, 94, 180), 3.0 if is_act_ry else 1.6)
+                    painter.setPen(pen_ry)
+                    painter.drawPolyline(QPolygonF(pts_y))
+
+                # Outer View-aligned Ring
+                is_act_rv = (active_part == 'rot_view' or hover_part == 'rot_view')
+                pen_rv = QPen(col_hi if is_act_rv else QColor(248, 250, 252, 100), 2.5 if is_act_rv else 1.2)
+                painter.setPen(pen_rv)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawEllipse(o, geom["gizmo_radius"] * 1.25, geom["gizmo_radius"] * 1.25)
+
+        # 2. Plane Slider Handles (Ground XY, XZ, YZ)
+        if mode in ("move", "all"):
+            # XY Ground Plane corner
+            is_act_pxy = (active_part == 'plane_xy' or hover_part == 'plane_xy')
+            p_xy_poly = QPolygonF([
+                o,
+                QPointF(o.x() + dir_x.x() * 22, o.y() + dir_x.y() * 22),
+                geom["plane_xy_pt"],
+                QPointF(o.x() + dir_y.x() * 22, o.y() + dir_y.y() * 22)
+            ])
+            painter.setBrush(QBrush(QColor(56, 189, 248, 140 if is_act_pxy else 60)))
+            painter.setPen(QPen(col_hi if is_act_pxy else QColor(56, 189, 248, 200), 1.5))
+            painter.drawPolygon(p_xy_poly)
+
+            if mode == "move":
+                # XZ Plane corner
+                is_act_pxz = (active_part == 'plane_xz' or hover_part == 'plane_xz')
+                p_xz_poly = QPolygonF([
+                    o,
+                    QPointF(o.x() + dir_x.x() * 22, o.y() + dir_x.y() * 22),
+                    geom["plane_xz_pt"],
+                    QPointF(o.x() + dir_z.x() * 22, o.y() + dir_z.y() * 22)
+                ])
+                painter.setBrush(QBrush(QColor(239, 68, 68, 140 if is_act_pxz else 50)))
+                painter.setPen(QPen(col_hi if is_act_pxz else QColor(239, 68, 68, 180), 1.5))
+                painter.drawPolygon(p_xz_poly)
+
+                # YZ Plane corner
+                is_act_pyz = (active_part == 'plane_yz' or hover_part == 'plane_yz')
+                p_yz_poly = QPolygonF([
+                    o,
+                    QPointF(o.x() + dir_y.x() * 22, o.y() + dir_y.y() * 22),
+                    geom["plane_yz_pt"],
+                    QPointF(o.x() + dir_z.x() * 22, o.y() + dir_z.y() * 22)
+                ])
+                painter.setBrush(QBrush(QColor(34, 197, 94, 140 if is_act_pyz else 50)))
+                painter.setPen(QPen(col_hi if is_act_pyz else QColor(34, 197, 94, 180), 1.5))
+                painter.drawPolygon(p_yz_poly)
+
+        # 3. Axis Shafts
+        is_act_x = (active_part in ('trans_x', 'scale_x') or hover_part in ('trans_x', 'scale_x'))
+        is_act_y = (active_part in ('trans_y', 'scale_y') or hover_part in ('trans_y', 'scale_y'))
+        is_act_z = (active_part in ('trans_z', 'scale_z') or hover_part in ('trans_z', 'scale_z'))
+
+        painter.setPen(QPen(col_hi if is_act_x else col_x, 3.0 if is_act_x else 2.2))
+        painter.drawLine(o, tip_x)
+
+        painter.setPen(QPen(col_hi if is_act_y else col_y, 3.0 if is_act_y else 2.2))
+        painter.drawLine(o, tip_y)
+
+        painter.setPen(QPen(col_hi if is_act_z else col_z, 3.0 if is_act_z else 2.2))
+        painter.drawLine(o, tip_z)
+
+        # Helper: Arrowhead
+        def draw_cone(tip, d_vec, col, is_act):
+            cone_len = 13.0
+            cone_w = 6.0
+            perp = QPointF(-d_vec.y(), d_vec.x())
+            base = QPointF(tip.x() - d_vec.x() * cone_len, tip.y() - d_vec.y() * cone_len)
+            p_l = QPointF(base.x() + perp.x() * cone_w, base.y() + perp.y() * cone_w)
+            p_r = QPointF(base.x() - perp.x() * cone_w, base.y() - perp.y() * cone_w)
+            painter.setBrush(QBrush(col_hi if is_act else col))
+            painter.setPen(QPen(col_hi if is_act else col.darker(130), 1.5))
+            painter.drawPolygon(QPolygonF([tip, p_l, p_r]))
+
+        # Helper: Scale Cube
+        def draw_box_handle(tip, col, is_act):
+            sz = 10.0
+            r = QRectF(tip.x() - sz * 0.5, tip.y() - sz * 0.5, sz, sz)
+            painter.setBrush(QBrush(col_hi if is_act else col))
+            painter.setPen(QPen(col_hi if is_act else col.darker(130), 1.5))
+            painter.drawRoundedRect(r, 2.0, 2.0)
+
+        # Helper: Badge
+        def draw_badge(tip, d_vec, label, col):
+            bp = QPointF(tip.x() + d_vec.x() * 11, tip.y() + d_vec.y() * 11)
+            painter.setBrush(QBrush(col.darker(160)))
+            painter.setPen(QPen(col, 1.5))
+            painter.drawEllipse(bp, 7, 7)
+            painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(QRectF(bp.x() - 7, bp.y() - 7, 14, 14), Qt.AlignCenter, label)
+
+        # 4. Axis Tips & Labels
+        if mode in ("move", "all"):
+            draw_cone(tip_x, dir_x, col_x, is_act_x)
+            draw_cone(tip_y, dir_y, col_y, is_act_y)
+            draw_cone(tip_z, dir_z, col_z, is_act_z)
+        elif mode == "scale":
+            draw_box_handle(tip_x, col_x, is_act_x)
+            draw_box_handle(tip_y, col_y, is_act_y)
+            draw_box_handle(tip_z, col_z, is_act_z)
+
+        draw_badge(tip_x, dir_x, "X", col_x)
+        draw_badge(tip_y, dir_y, "Y", col_y)
+        draw_badge(tip_z, dir_z, "Z", col_z)
+
+        # 5. Center View Disc
+        is_act_c = (active_part in ('center', 'scale_uniform') or hover_part in ('center', 'scale_uniform'))
+        painter.setBrush(QBrush(col_hi if is_act_c else QColor(255, 255, 255, 180)))
+        painter.setPen(QPen(QColor(56, 189, 248) if is_act_c else QColor(15, 23, 42, 220), 2.0 if is_act_c else 1.5))
+        painter.drawEllipse(o, 8, 8)
+
+        painter.restore()
+
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1491,6 +1931,8 @@ class GroundCalibratorWidget(QWidget):
                 preview_mesh = create_cone_primitive(radius=min(rw, rd) * 0.5, height=rh, segments=24)
             elif ptype == "Plane":
                 preview_mesh = create_plane_primitive(rw, rd, 2)
+            elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+                preview_mesh = create_room_primitive(rw, rh, rd)
             elif ptype == "Loaded 3D Model" and self.mesh and getattr(self.mesh, 'vertices', None):
                 preview_mesh = self.mesh
                 obj_trans = ObjectTransform()
@@ -1522,50 +1964,8 @@ class GroundCalibratorWidget(QWidget):
                 painter.drawImage(int(self.img_rect.x()), int(self.img_rect.y()), prev_img)
                 painter.setOpacity(1.0)
 
-        # 6. ON-SCREEN TRANSFORM GIZMO (Center Move ✥, Rotate ⟳, Scale ⤢)
-        c_w, move_rect, rot_pt, scale_pt = self._get_gizmo_parts()
-
-        # Connecting dashed lines
-        p_stem_rot = QPen(QColor(168, 85, 247, 200), 1.5, Qt.DashLine)
-        painter.setPen(p_stem_rot)
-        painter.drawLine(c_w, rot_pt)
-
-        p_stem_scale = QPen(QColor(245, 158, 11, 200), 1.5, Qt.DashLine)
-        painter.setPen(p_stem_scale)
-        painter.drawLine(c_w, scale_pt)
-
-        # Rotate Handle (at rot_pt)
-        is_rot_act = (self.active_gizmo_action == 'rotate' or self.hover_gizmo_part == 'rotate')
-        rot_bg = QColor(88, 28, 135) if is_rot_act else QColor(15, 23, 42, 230)
-        rot_border = QColor(216, 180, 254) if is_rot_act else QColor(168, 85, 247)
-        painter.setBrush(QBrush(rot_bg))
-        painter.setPen(QPen(rot_border, 2.0 if is_rot_act else 1.5))
-        painter.drawEllipse(rot_pt, 12, 12)
-        painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        painter.setPen(QColor(255, 255, 255))
-        painter.drawText(QRectF(rot_pt.x() - 12, rot_pt.y() - 12, 24, 24), Qt.AlignCenter, "⟳")
-
-        # Scale Handle (at scale_pt)
-        is_scale_act = (self.active_gizmo_action == 'scale' or self.hover_gizmo_part == 'scale')
-        scale_bg = QColor(180, 83, 9) if is_scale_act else QColor(15, 23, 42, 230)
-        scale_border = QColor(253, 224, 71) if is_scale_act else QColor(245, 158, 11)
-        painter.setBrush(QBrush(scale_bg))
-        painter.setPen(QPen(scale_border, 2.0 if is_scale_act else 1.5))
-        painter.drawEllipse(scale_pt, 12, 12)
-        painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        painter.setPen(QColor(255, 255, 255))
-        painter.drawText(QRectF(scale_pt.x() - 12, scale_pt.y() - 12, 24, 24), Qt.AlignCenter, "⤢")
-
-        # Center Move Disc Handle (at c_w)
-        is_move_act = (self.active_gizmo_action == 'move' or self.hover_gizmo_part == 'move')
-        move_bg = QColor(2, 132, 199) if is_move_act else QColor(15, 23, 42, 230)
-        move_border = QColor(125, 211, 252) if is_move_act else QColor(56, 189, 248)
-        painter.setBrush(QBrush(move_bg))
-        painter.setPen(QPen(move_border, 2.0 if is_move_act else 1.5))
-        painter.drawEllipse(c_w, 13, 13)
-        painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        painter.setPen(QColor(255, 255, 255))
-        painter.drawText(QRectF(c_w.x() - 13, c_w.y() - 13, 26, 26), Qt.AlignCenter, "✥")
+        # 6. ON-SCREEN TRANSFORM GIZMO (Blender-Style 3D Transform Gizmo)
+        self._paint_3d_blender_gizmo(painter)
 
         # 7. Corner Pin Handles (Pins)
         handle_colors = [
@@ -1780,7 +2180,7 @@ class GroundCalibratorDialog(QDialog):
         prim_items = ["📐 Ground Rectangle"]
         if mesh and getattr(mesh, 'vertices', None) and not getattr(mesh, 'primitive_type', None):
             prim_items.insert(0, "📁 Loaded 3D Model")
-        prim_items.extend(["📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane"])
+        prim_items.extend(["📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane", "🏠 Room (3 Planes)"])
         self.combo_primitive.addItems(prim_items)
 
         if start_in_click_draw or initial_mode in ("box", "primitive", 5):
@@ -1846,6 +2246,44 @@ class GroundCalibratorDialog(QDialog):
         btn_history.clicked.connect(self._on_history_clicked)
         top_bar.addWidget(btn_history)
 
+        sep_giz = QFrame()
+        sep_giz.setFrameShape(QFrame.VLine)
+        sep_giz.setStyleSheet("color:#334155;")
+        top_bar.addWidget(sep_giz)
+
+        lbl_giz = QLabel("Gizmo:")
+        lbl_giz.setStyleSheet("color:#94a3b8; font-weight:bold;")
+        top_bar.addWidget(lbl_giz)
+
+        self.btn_giz_all = QPushButton("⚙ All (A)")
+        self.btn_giz_all.setCheckable(True)
+        self.btn_giz_all.setChecked(True)
+        self.btn_giz_all.setStyleSheet("background:#2563eb; color:#ffffff; font-weight:bold; border:1px solid #60a5fa;")
+        self.btn_giz_all.setToolTip("Blender 3D Transform: All axes (Move, Rotate, Scale) [Key: A]")
+        self.btn_giz_all.clicked.connect(lambda: self._set_gizmo_mode("all"))
+        top_bar.addWidget(self.btn_giz_all)
+
+        self.btn_giz_move = QPushButton("✥ Move (G)")
+        self.btn_giz_move.setCheckable(True)
+        self.btn_giz_move.setStyleSheet("background:#323642; color:#cbd5e1; font-weight:bold; border:1px solid #434958;")
+        self.btn_giz_move.setToolTip("Blender 3D Translation axes (Red X, Green Y, Blue Z Up) [Key: G]")
+        self.btn_giz_move.clicked.connect(lambda: self._set_gizmo_mode("move"))
+        top_bar.addWidget(self.btn_giz_move)
+
+        self.btn_giz_rot = QPushButton("⟳ Rotate (R)")
+        self.btn_giz_rot.setCheckable(True)
+        self.btn_giz_rot.setStyleSheet("background:#323642; color:#cbd5e1; font-weight:bold; border:1px solid #434958;")
+        self.btn_giz_rot.setToolTip("Blender 3D Rotation rings (Pitch X, Roll Y, Yaw Z) [Key: R]")
+        self.btn_giz_rot.clicked.connect(lambda: self._set_gizmo_mode("rotate"))
+        top_bar.addWidget(self.btn_giz_rot)
+
+        self.btn_giz_scale = QPushButton("⤢ Scale (S)")
+        self.btn_giz_scale.setCheckable(True)
+        self.btn_giz_scale.setStyleSheet("background:#323642; color:#cbd5e1; font-weight:bold; border:1px solid #434958;")
+        self.btn_giz_scale.setToolTip("Blender 3D Scale axes [Key: S]")
+        self.btn_giz_scale.clicked.connect(lambda: self._set_gizmo_mode("scale"))
+        top_bar.addWidget(self.btn_giz_scale)
+
         top_bar.addStretch(1)
         layout.addLayout(top_bar)
 
@@ -1875,6 +2313,7 @@ class GroundCalibratorDialog(QDialog):
         )
         self.calibrator_widget.solution_changed.connect(self._on_solution_changed)
         self.calibrator_widget.guidance_changed.connect(self._set_guidance)
+        self.calibrator_widget.gizmo_mode_changed.connect(self._sync_gizmo_buttons)
         layout.addWidget(self.calibrator_widget, 1)
 
         # Sync initial primitive selection to widget
@@ -2038,6 +2477,23 @@ class GroundCalibratorDialog(QDialog):
         self.calibrator_widget._recalculate()
         self.calibrator_widget.update()
 
+    def _sync_gizmo_buttons(self, mode):
+        for btn, is_active in [
+            (self.btn_giz_all, mode == "all"),
+            (self.btn_giz_move, mode == "move"),
+            (self.btn_giz_rot, mode == "rotate"),
+            (self.btn_giz_scale, mode == "scale"),
+        ]:
+            btn.setChecked(is_active)
+            if is_active:
+                btn.setStyleSheet("background:#2563eb; color:#ffffff; font-weight:bold; border:1px solid #60a5fa;")
+            else:
+                btn.setStyleSheet("background:#323642; color:#cbd5e1; font-weight:bold; border:1px solid #434958;")
+
+    def _set_gizmo_mode(self, mode):
+        self._sync_gizmo_buttons(mode)
+        self.calibrator_widget.set_gizmo_mode(mode)
+
     def _set_guidance(self, text, level="info"):
         if not hasattr(self, 'lbl_guidance') or self.lbl_guidance is None:
             return
@@ -2096,6 +2552,8 @@ class GroundCalibratorDialog(QDialog):
             sol["mesh"] = create_cone_primitive(rw * 0.5, rh, 24)
         elif ptype == "Plane":
             sol["mesh"] = create_plane_primitive(rw, rd, 2)
+        elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+            sol["mesh"] = create_room_primitive(rw, rh, rd)
         else:
             sol["mesh"] = None
 

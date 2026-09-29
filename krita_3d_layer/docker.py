@@ -37,7 +37,7 @@ from .ground_calibrator import GroundCalibratorDialog
 from .primitive_drawer import (
     PrimitiveDrawerDialog, create_box_primitive, create_cylinder_primitive,
     create_sphere_primitive, create_pyramid_primitive, create_cone_primitive,
-    create_plane_primitive
+    create_plane_primitive, create_room_primitive
 )
 from .quick_toolbar import QuickActionsToolbar
 
@@ -855,7 +855,7 @@ class Krita3DLayerDocker(DockWidget):
         prim_hdr_row.addWidget(self.lbl_primitive_title, 1)
 
         self.combo_primitive_type = QComboBox()
-        self.combo_primitive_type.addItems(["📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane"])
+        self.combo_primitive_type.addItems(["📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane", "🏠 Room (3 Planes)"])
         self.combo_primitive_type.setToolTip("Select or convert primitive shape")
         self.combo_primitive_type.currentTextChanged.connect(self._on_primitive_type_selected)
         prim_hdr_row.addWidget(self.combo_primitive_type, 1)
@@ -968,6 +968,60 @@ class Krita3DLayerDocker(DockWidget):
         pl_r2.addWidget(self.spin_prim_plane_sub, 1)
         l_p_pl.addLayout(pl_r2)
         l_prim.addWidget(self.w_prim_plane)
+
+        # -- Room (3 Planes) sub-widget --
+        self.w_prim_room = QWidget()
+        l_p_rm = QVBoxLayout(self.w_prim_room); l_p_rm.setContentsMargins(0, 0, 0, 0); l_p_rm.setSpacing(2)
+        rm_r1 = QHBoxLayout(); rm_r1.setSpacing(2)
+        self.spin_prim_room_w = self._dspin(0.1, 100.0, 4.0, 0.2, self._on_primitive_param_changed)
+        rm_r1.addWidget(ScrubLabel("Width:", self.spin_prim_room_w), 0)
+        rm_r1.addWidget(self.spin_prim_room_w, 1)
+        self.spin_prim_room_d = self._dspin(0.1, 100.0, 4.0, 0.2, self._on_primitive_param_changed)
+        rm_r1.addWidget(ScrubLabel("Depth:", self.spin_prim_room_d), 0)
+        rm_r1.addWidget(self.spin_prim_room_d, 1)
+        l_p_rm.addLayout(rm_r1)
+
+        rm_r2 = QHBoxLayout(); rm_r2.setSpacing(2)
+        self.spin_prim_room_h = self._dspin(0.1, 50.0, 2.8, 0.2, self._on_primitive_param_changed)
+        rm_r2.addWidget(ScrubLabel("Height:", self.spin_prim_room_h), 0)
+        rm_r2.addWidget(self.spin_prim_room_h, 1)
+        self.combo_prim_room_side = QComboBox()
+        self.combo_prim_room_side.addItems(["Left Wall", "Right Wall", "Both Walls"])
+        self.combo_prim_room_side.setToolTip("Select which side wall is displayed in the 3-plane room corner")
+        self.combo_prim_room_side.currentIndexChanged.connect(self._on_primitive_param_changed)
+        rm_r2.addWidget(self.combo_prim_room_side, 1)
+        l_p_rm.addLayout(rm_r2)
+
+        rm_r3 = QHBoxLayout(); rm_r3.setSpacing(2)
+        self.spin_prim_room_sw = self._ispin(1, 32, 4, 1, self._on_primitive_param_changed)
+        self.spin_prim_room_sw.setToolTip("Wall & floor sections / grid subdivisions along Width")
+        rm_r3.addWidget(ScrubLabel("Grid W:", self.spin_prim_room_sw), 0)
+        rm_r3.addWidget(self.spin_prim_room_sw, 1)
+        self.spin_prim_room_sd = self._ispin(1, 32, 4, 1, self._on_primitive_param_changed)
+        self.spin_prim_room_sd.setToolTip("Wall & floor sections / grid subdivisions along Depth")
+        rm_r3.addWidget(ScrubLabel("Grid D:", self.spin_prim_room_sd), 0)
+        rm_r3.addWidget(self.spin_prim_room_sd, 1)
+        self.spin_prim_room_sh = self._ispin(1, 32, 4, 1, self._on_primitive_param_changed)
+        self.spin_prim_room_sh.setToolTip("Wall sections / grid subdivisions along Height")
+        rm_r3.addWidget(ScrubLabel("Grid H:", self.spin_prim_room_sh), 0)
+        rm_r3.addWidget(self.spin_prim_room_sh, 1)
+        l_p_rm.addLayout(rm_r3)
+
+        rm_r4 = QHBoxLayout(); rm_r4.setSpacing(4)
+        self.chk_prim_room_floor = QCheckBox("Floor")
+        self.chk_prim_room_floor.setChecked(True)
+        self.chk_prim_room_floor.stateChanged.connect(self._on_primitive_param_changed)
+        rm_r4.addWidget(self.chk_prim_room_floor)
+        self.chk_prim_room_back = QCheckBox("Back Wall")
+        self.chk_prim_room_back.setChecked(True)
+        self.chk_prim_room_back.stateChanged.connect(self._on_primitive_param_changed)
+        rm_r4.addWidget(self.chk_prim_room_back)
+        self.chk_prim_room_side = QCheckBox("Side Wall")
+        self.chk_prim_room_side.setChecked(True)
+        self.chk_prim_room_side.stateChanged.connect(self._on_primitive_param_changed)
+        rm_r4.addWidget(self.chk_prim_room_side)
+        l_p_rm.addLayout(rm_r4)
+        l_prim.addWidget(self.w_prim_room)
 
         self.sec_object.add_widget(self.frame_primitive)
         self.frame_primitive.setVisible(False)
@@ -1578,6 +1632,20 @@ class Krita3DLayerDocker(DockWidget):
         self.chk_vp_quick_toolbar.stateChanged.connect(self._on_toggle_quick_toolbar)
         self.sec_viewport_settings.add_widget(self.chk_vp_quick_toolbar)
 
+        row_qtp = QHBoxLayout(); row_qtp.setSpacing(4)
+        lbl_qtp = QLabel("Toolbar Placement:")
+        lbl_qtp.setStyleSheet("color:#94a3b8; font-weight:bold;")
+        row_qtp.addWidget(lbl_qtp)
+        self.combo_quick_toolbar_placement = QComboBox()
+        self.combo_quick_toolbar_placement.addItems([
+            "Below Viewport (Pinned)",
+            "Top of Controls Section"
+        ])
+        self.combo_quick_toolbar_placement.setToolTip("Choose whether Quick Actions toolbar is pinned right beneath the 3D Viewport or sits at the top of the scrollable controls panel")
+        self.combo_quick_toolbar_placement.currentIndexChanged.connect(self._on_quick_toolbar_placement_changed)
+        row_qtp.addWidget(self.combo_quick_toolbar_placement, 1)
+        self.sec_viewport_settings.add_layout(row_qtp)
+
         self.chk_sticky_viewport = QCheckBox("Sticky Viewport (Pinned at Top of Docker)")
         self.chk_sticky_viewport.setChecked(True)
         self.chk_sticky_viewport.setToolTip("When enabled, 3D viewport stays pinned at top while scrolling controls")
@@ -1827,6 +1895,8 @@ class Krita3DLayerDocker(DockWidget):
             mesh = create_cone_primitive(w * 0.5, h, 24)
         elif ptype == "Plane":
             mesh = create_plane_primitive(w, d, 2)
+        elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+            mesh = create_room_primitive(w, h, d)
         else:
             mesh = create_box_primitive(w, h, d)
 
@@ -2005,6 +2075,7 @@ class Krita3DLayerDocker(DockWidget):
         self.w_prim_pyr.setVisible(ptype == "Pyramid")
         self.w_prim_cone.setVisible(ptype == "Cone")
         self.w_prim_plane.setVisible(ptype == "Plane")
+        self.w_prim_room.setVisible(ptype in ("Room", "Room (3 Planes)", "Room Corner"))
 
         params = getattr(self.mesh, 'primitive_params', {}) or {}
         if ptype == "Box":
@@ -2049,6 +2120,29 @@ class Krita3DLayerDocker(DockWidget):
                 self.spin_prim_plane_d.blockSignals(True); self.spin_prim_plane_d.setValue(params["d"]); self.spin_prim_plane_d.blockSignals(False)
             if "subdivisions" in params:
                 self.spin_prim_plane_sub.blockSignals(True); self.spin_prim_plane_sub.setValue(params["subdivisions"]); self.spin_prim_plane_sub.blockSignals(False)
+        elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+            if "w" in params:
+                self.spin_prim_room_w.blockSignals(True); self.spin_prim_room_w.setValue(params["w"]); self.spin_prim_room_w.blockSignals(False)
+            if "h" in params:
+                self.spin_prim_room_h.blockSignals(True); self.spin_prim_room_h.setValue(params["h"]); self.spin_prim_room_h.blockSignals(False)
+            if "d" in params:
+                self.spin_prim_room_d.blockSignals(True); self.spin_prim_room_d.setValue(params["d"]); self.spin_prim_room_d.blockSignals(False)
+            if "subdiv_w" in params:
+                self.spin_prim_room_sw.blockSignals(True); self.spin_prim_room_sw.setValue(params["subdiv_w"]); self.spin_prim_room_sw.blockSignals(False)
+            if "subdiv_h" in params:
+                self.spin_prim_room_sh.blockSignals(True); self.spin_prim_room_sh.setValue(params["subdiv_h"]); self.spin_prim_room_sh.blockSignals(False)
+            if "subdiv_d" in params:
+                self.spin_prim_room_sd.blockSignals(True); self.spin_prim_room_sd.setValue(params["subdiv_d"]); self.spin_prim_room_sd.blockSignals(False)
+            if "side_wall" in params:
+                side = str(params["side_wall"]).lower()
+                idx = 1 if side == 'right' else (2 if side == 'both' else 0)
+                self.combo_prim_room_side.blockSignals(True); self.combo_prim_room_side.setCurrentIndex(idx); self.combo_prim_room_side.blockSignals(False)
+            if "show_floor" in params:
+                self.chk_prim_room_floor.blockSignals(True); self.chk_prim_room_floor.setChecked(params["show_floor"]); self.chk_prim_room_floor.blockSignals(False)
+            if "show_back_wall" in params:
+                self.chk_prim_room_back.blockSignals(True); self.chk_prim_room_back.setChecked(params["show_back_wall"]); self.chk_prim_room_back.blockSignals(False)
+            if "show_side_wall" in params:
+                self.chk_prim_room_side.blockSignals(True); self.chk_prim_room_side.setChecked(params["show_side_wall"]); self.chk_prim_room_side.blockSignals(False)
 
     def _create_primitive(self, ptype):
         self._reset_obj_all()
@@ -2082,6 +2176,20 @@ class Krita3DLayerDocker(DockWidget):
             d = self.spin_prim_plane_d.value() if hasattr(self, 'spin_prim_plane_d') else 2.0
             sub = self.spin_prim_plane_sub.value() if hasattr(self, 'spin_prim_plane_sub') else 2
             new_mesh = create_plane_primitive(w, d, sub)
+        elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+            w = self.spin_prim_room_w.value() if hasattr(self, 'spin_prim_room_w') else 4.0
+            h = self.spin_prim_room_h.value() if hasattr(self, 'spin_prim_room_h') else 2.8
+            d = self.spin_prim_room_d.value() if hasattr(self, 'spin_prim_room_d') else 4.0
+            sw = self.spin_prim_room_sw.value() if hasattr(self, 'spin_prim_room_sw') else 4
+            sh = self.spin_prim_room_sh.value() if hasattr(self, 'spin_prim_room_sh') else 4
+            sd = self.spin_prim_room_sd.value() if hasattr(self, 'spin_prim_room_sd') else 4
+            side_txt = self.combo_prim_room_side.currentText().lower() if hasattr(self, 'combo_prim_room_side') else 'left'
+            side = 'right' if 'right' in side_txt else ('both' if 'both' in side_txt else 'left')
+            fl = self.chk_prim_room_floor.isChecked() if hasattr(self, 'chk_prim_room_floor') else True
+            bw = self.chk_prim_room_back.isChecked() if hasattr(self, 'chk_prim_room_back') else True
+            sw_chk = self.chk_prim_room_side.isChecked() if hasattr(self, 'chk_prim_room_side') else True
+            new_mesh = create_room_primitive(w, h, d, subdiv_w=sw, subdiv_h=sh, subdiv_d=sd,
+                                             side_wall=side, show_floor=fl, show_back_wall=bw, show_side_wall=sw_chk)
         else:
             return
 
@@ -2096,7 +2204,9 @@ class Krita3DLayerDocker(DockWidget):
         self._save_session()
 
     def _on_primitive_type_selected(self, text):
-        clean_name = text.replace("📦", "").replace("🛢️", "").replace("🔮", "").replace("📐", "").replace("🍦", "").replace("🏁", "").strip()
+        clean_name = text.replace("📦", "").replace("🛢️", "").replace("🔮", "").replace("📐", "").replace("🍦", "").replace("🏁", "").replace("🏠", "").strip()
+        if "Room" in clean_name:
+            clean_name = "Room"
         self._create_primitive(clean_name)
 
     def _on_primitive_param_changed(self):
@@ -2133,6 +2243,20 @@ class Krita3DLayerDocker(DockWidget):
             d = self.spin_prim_plane_d.value()
             sub = self.spin_prim_plane_sub.value()
             new_mesh = create_plane_primitive(w, d, sub)
+        elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+            w = self.spin_prim_room_w.value()
+            h = self.spin_prim_room_h.value()
+            d = self.spin_prim_room_d.value()
+            sw = self.spin_prim_room_sw.value()
+            sh = self.spin_prim_room_sh.value()
+            sd = self.spin_prim_room_sd.value()
+            side_txt = self.combo_prim_room_side.currentText().lower()
+            side = 'right' if 'right' in side_txt else ('both' if 'both' in side_txt else 'left')
+            fl = self.chk_prim_room_floor.isChecked()
+            bw = self.chk_prim_room_back.isChecked()
+            sw_chk = self.chk_prim_room_side.isChecked()
+            new_mesh = create_room_primitive(w, h, d, subdiv_w=sw, subdiv_h=sh, subdiv_d=sd,
+                                             side_wall=side, show_floor=fl, show_back_wall=bw, show_side_wall=sw_chk)
         else:
             return
 
@@ -3308,6 +3432,31 @@ class Krita3DLayerDocker(DockWidget):
             self.quick_toolbar.setVisible(show)
         self._schedule_save()
 
+    def _on_quick_toolbar_placement_changed(self, idx):
+        placement = "controls" if idx == 1 else "viewport"
+        self._set_quick_toolbar_placement(placement)
+
+    def _set_quick_toolbar_placement(self, placement):
+        if not hasattr(self, 'quick_toolbar') or not hasattr(self, '_top_viewport_layout'):
+            return
+        self._top_viewport_layout.removeWidget(self.quick_toolbar)
+        if hasattr(self, '_controls_layout'):
+            self._controls_layout.removeWidget(self.quick_toolbar)
+
+        if placement == "controls":
+            if hasattr(self, '_controls_layout'):
+                self._controls_layout.insertWidget(0, self.quick_toolbar)
+        else:
+            self._top_viewport_layout.addWidget(self.quick_toolbar)
+
+        self.quick_toolbar_placement = placement
+        self.quick_toolbar.updateGeometry()
+        if hasattr(self, 'combo_quick_toolbar_placement'):
+            self.combo_quick_toolbar_placement.blockSignals(True)
+            self.combo_quick_toolbar_placement.setCurrentIndex(1 if placement == "controls" else 0)
+            self.combo_quick_toolbar_placement.blockSignals(False)
+        self._schedule_save()
+
     def _on_toggle_vp_gradient(self, state):
         self.viewport.bg_use_gradient = (state == Qt.Checked)
         if hasattr(self, 'btn_vp_bg_bot'):
@@ -3632,7 +3781,8 @@ class Krita3DLayerDocker(DockWidget):
             "bg_color_top":         self.viewport.bg_color_top.name() if hasattr(self.viewport, 'bg_color_top') else "#323844",
             "bg_color_bottom":      self.viewport.bg_color_bottom.name() if hasattr(self.viewport, 'bg_color_bottom') else "#181b22",
             "quick_toolbar_items":  self.quick_toolbar.get_items() if hasattr(self, 'quick_toolbar') else [],
-            "quick_toolbar_btn_height": getattr(self.quick_toolbar, "button_height", 26) if hasattr(self, "quick_toolbar") else 26,
+            "quick_toolbar_btn_height": getattr(self.quick_toolbar, "button_height", 24) if hasattr(self, "quick_toolbar") else 24,
+            "quick_toolbar_placement": getattr(self, "quick_toolbar_placement", "viewport"),
 
             # Camera Navigation & Transform
             "nav_camera_mode":      self.viewport.camera_mode,
@@ -3792,6 +3942,15 @@ class Krita3DLayerDocker(DockWidget):
                     self.mesh = create_cone_primitive(pparams.get("radius", 1.0), pparams.get("height", 2.0), pparams.get("segments", 24))
                 elif ptype == "Plane":
                     self.mesh = create_plane_primitive(pparams.get("w", 2.0), pparams.get("d", 2.0), pparams.get("subdivisions", 2))
+                elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+                    self.mesh = create_room_primitive(
+                        pparams.get("w", 4.0), pparams.get("h", 2.8), pparams.get("d", 4.0),
+                        subdiv_w=pparams.get("subdiv_w", 4), subdiv_h=pparams.get("subdiv_h", 4), subdiv_d=pparams.get("subdiv_d", 4),
+                        side_wall=pparams.get("side_wall", "left"),
+                        show_floor=pparams.get("show_floor", True),
+                        show_back_wall=pparams.get("show_back_wall", True),
+                        show_side_wall=pparams.get("show_side_wall", True),
+                    )
                 if self.mesh:
                     self.viewport.set_mesh(self.mesh)
                     self.lbl_model.setText(f"Primitive: {ptype}\n{len(self.mesh.vertices)} verts, {len(self.mesh.faces)} faces")
@@ -3885,6 +4044,9 @@ class Krita3DLayerDocker(DockWidget):
                 self.chk_vp_quick_toolbar.blockSignals(True)
                 self.chk_vp_quick_toolbar.setChecked(show_qt)
                 self.chk_vp_quick_toolbar.blockSignals(False)
+
+            qtp = data.get("quick_toolbar_placement", "viewport")
+            self._set_quick_toolbar_placement(qtp)
 
             # Viewport Background Styling
             use_grad = bool(data.get("bg_use_gradient", True))

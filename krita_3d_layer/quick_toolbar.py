@@ -93,6 +93,14 @@ ACTION_CATALOG = {
         "color": "#1e293b",
         "text_color": "#e2e8f0",
     },
+    "prim_room": {
+        "name": "Add Room Corner (3 Planes)",
+        "icon": "🏠",
+        "label": "Room 3P",
+        "tooltip": "Load or create a 3-plane room interior primitive (floor + 2 walls with section grids)",
+        "color": "#1e293b",
+        "text_color": "#fed7aa",
+    },
     "import_file": {
         "name": "Import 3D Model File",
         "icon": "📁",
@@ -481,7 +489,7 @@ class FlowLayout(QLayout):
 
         for item in self._item_list:
             wid = item.widget()
-            if wid and not wid.isVisible():
+            if wid and wid.isHidden():
                 continue
             item_size = item.sizeHint()
             next_x = x + item_size.width() + self._h_spacing
@@ -506,7 +514,7 @@ class FlowLayout(QLayout):
 # =====================================================================
 class QuickActionsToolbar(QWidget):
     """
-    Mini toolbar hosted directly below the Viewport resize handle.
+    Mini toolbar hosted directly below the Viewport resize handle or top of controls.
     Displays configured quick shortcut buttons in an auto-wrapping flow layout
     so buttons are neatly aligned, never clipped, and wrap to new lines smoothly.
     Supports user-adjustable height and button sizing.
@@ -518,25 +526,54 @@ class QuickActionsToolbar(QWidget):
         super().__init__(parent)
         self.docker = docker
         self.items = list(TOOLBAR_PRESETS["Artist Essentials"])
-        self._button_height = 26
+        self._button_height = 24
 
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-        self.flow_layout = FlowLayout(self, margin=2, h_spacing=3, v_spacing=3)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setStyleSheet("""
+            QuickActionsToolbar {
+                background: #141821;
+                border: 1px solid #232b3b;
+                border-radius: 6px;
+            }
+        """)
 
-        # Config gear button
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(4, 3, 4, 4)
+        main_layout.setSpacing(3)
+        self._main_layout = main_layout
+
+        # Header strip: Title on left, Config button on right
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(2, 0, 2, 0)
+        header_row.setSpacing(4)
+
+        self.lbl_title = QLabel("⚡ QUICK ACTIONS")
+        self.lbl_title.setStyleSheet("font-size: 9px; font-weight: bold; color: #64748b; letter-spacing: 0.5px;")
+        header_row.addWidget(self.lbl_title)
+        header_row.addStretch(1)
+
         self.btn_config = QPushButton("⚙")
+        self.btn_config.setFixedSize(18, 18)
         self.btn_config.setToolTip("Customize Quick Actions Toolbar (add/remove shortcuts, change colors, presets, adjust height)")
         self.btn_config.setStyleSheet(
-            "QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 4px; font-size: 11px; padding: 0; }"
+            "QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 3px; font-size: 10px; padding: 0; }"
             "QPushButton:hover { background: #334155; color: #38bdf8; border-color: #38bdf8; }"
         )
         self.btn_config.clicked.connect(self._open_customizer)
+        header_row.addWidget(self.btn_config)
+        main_layout.addLayout(header_row)
+
+        # Button container with FlowLayout
+        self.btn_container = QWidget()
+        self.btn_container.setStyleSheet("background: transparent; border: none;")
+        self.flow_layout = FlowLayout(self.btn_container, margin=0, h_spacing=3, v_spacing=3)
+        main_layout.addWidget(self.btn_container)
 
         self.rebuild_buttons()
 
     @property
     def button_height(self):
-        return getattr(self, "_button_height", 26)
+        return getattr(self, "_button_height", 24)
 
     @button_height.setter
     def button_height(self, h):
@@ -544,7 +581,7 @@ class QuickActionsToolbar(QWidget):
 
     def set_button_height(self, h):
         val = max(20, min(50, int(h)))
-        if val != getattr(self, "_button_height", 26):
+        if val != getattr(self, "_button_height", 24):
             self._button_height = val
             self.rebuild_buttons()
 
@@ -553,18 +590,27 @@ class QuickActionsToolbar(QWidget):
 
     def heightForWidth(self, width):
         w = max(60, width)
-        return self.flow_layout.heightForWidth(w)
+        flow_w = max(40, w - 10)
+        flow_h = self.flow_layout.heightForWidth(flow_w)
+        return 22 + flow_h + 7
 
     def sizeHint(self):
         w = self.width() if self.width() > 50 else (self.parentWidget().width() if self.parentWidget() and self.parentWidget().width() > 50 else 280)
-        h = self.flow_layout.heightForWidth(w)
-        return QSize(w, max(h, self.button_height + 6))
+        h = self.heightForWidth(w)
+        return QSize(w, h)
 
     def minimumSizeHint(self):
         return self.sizeHint()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        w = max(60, self.width())
+        h = self.heightForWidth(w)
+        if abs(self.height() - h) > 1:
+            self.setFixedHeight(h)
+        flow_w = max(40, w - 10)
+        flow_h = self.flow_layout.heightForWidth(flow_w)
+        self.flow_layout.setGeometry(QRect(0, 0, flow_w, flow_h))
         self.updateGeometry()
 
     def set_items(self, items):
@@ -579,13 +625,12 @@ class QuickActionsToolbar(QWidget):
         while self.flow_layout.count() > 0:
             item = self.flow_layout.takeAt(0)
             w = item.widget()
-            if w and w is not self.btn_config:
+            if w:
                 w.deleteLater()
 
-        bh = getattr(self, "_button_height", 26)
+        bh = getattr(self, "_button_height", 24)
         font_size = max(9, min(12, int(bh * 0.40)))
         pad_v = max(1, int((bh - font_size - 8) * 0.5))
-        self.btn_config.setFixedSize(max(20, bh - 4), bh)
 
         for item in self.items:
             action_id = item.get("action_id", "")
@@ -598,7 +643,7 @@ class QuickActionsToolbar(QWidget):
 
             btn = QPushButton(f"{icon} {label}".strip())
             btn.setFixedHeight(bh)
-            btn.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             btn.setToolTip(tooltip)
             btn.setStyleSheet(f"""
                 QPushButton {{
@@ -608,7 +653,7 @@ class QuickActionsToolbar(QWidget):
                     border-radius: 4px;
                     font-size: {font_size}px;
                     font-weight: 600;
-                    padding: {pad_v}px 8px;
+                    padding: {pad_v}px 7px;
                 }}
                 QPushButton:hover {{
                     border-color: #38bdf8;
@@ -619,10 +664,17 @@ class QuickActionsToolbar(QWidget):
                 }}
             """)
             btn.clicked.connect(lambda checked, aid=action_id: self._trigger_action(aid))
+            # Calculate tight fixed size based on content so it never stretches across width
+            hint_w = btn.sizeHint().width()
+            btn.setFixedWidth(max(40, hint_w + 4))
             self.flow_layout.addWidget(btn)
 
-        # Place config gear button at end of flow
-        self.flow_layout.addWidget(self.btn_config)
+        cur_w = self.width() if self.width() > 60 else (self.parentWidget().width() if self.parentWidget() and self.parentWidget().width() > 60 else 280)
+        h = self.heightForWidth(cur_w)
+        self.setFixedHeight(h)
+        flow_w = max(40, cur_w - 10)
+        flow_h = self.flow_layout.heightForWidth(flow_w)
+        self.flow_layout.setGeometry(QRect(0, 0, flow_w, flow_h))
         self.updateGeometry()
         p = self.parentWidget()
         if p:
@@ -657,6 +709,8 @@ class QuickActionsToolbar(QWidget):
             d._create_primitive("Cone")
         elif action_id == "prim_plane":
             d._create_primitive("Plane")
+        elif action_id in ("prim_room", "room_3p"):
+            d._create_primitive("Room")
         elif action_id == "import_file":
             d._import()
         elif action_id == "clear_model":

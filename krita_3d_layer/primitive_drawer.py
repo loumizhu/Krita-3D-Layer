@@ -457,6 +457,143 @@ def create_plane_primitive(w=2.0, d=2.0, subdivisions=1, name="Primitive Plane")
     return mesh
 
 
+def _add_subdivided_quad_to_mesh(mesh, p00, p10, p11, p01, subs_u, subs_v):
+    """
+    Subdivides a 3D quad spanning corners p00, p10, p11, p01 into subs_u x subs_v grid cells.
+    Adds vertices, two-sided faces, quad boundary/grid polygon_edges, and diagonal coplanar_edges.
+    """
+    subs_u = max(1, min(64, int(subs_u)))
+    subs_v = max(1, min(64, int(subs_v)))
+    start_v_idx = len(mesh.vertices)
+
+    for j in range(subs_v + 1):
+        tv = float(j) / float(subs_v)
+        p_left = p00 + (p01 - p00) * tv
+        p_right = p10 + (p11 - p10) * tv
+        for i in range(subs_u + 1):
+            tu = float(i) / float(subs_u)
+            pt = p_left + (p_right - p_left) * tu
+            mesh.vertices.append(pt)
+
+    row_len = subs_u + 1
+    for j in range(subs_v):
+        for i in range(subs_u):
+            i0 = start_v_idx + j * row_len + i
+            i1 = start_v_idx + j * row_len + (i + 1)
+            i2 = start_v_idx + (j + 1) * row_len + (i + 1)
+            i3 = start_v_idx + (j + 1) * row_len + i
+
+            # Front-facing
+            mesh.faces.append((i0, i2, i1))
+            mesh.faces.append((i0, i3, i2))
+            # Reverse-facing (for two-sided visibility from inside/outside the room)
+            mesh.faces.append((i0, i1, i2))
+            mesh.faces.append((i0, i2, i3))
+
+            mesh.coplanar_edges.add((min(i0, i2), max(i0, i2)))
+            mesh.polygon_edges.add((min(i0, i1), max(i0, i1)))
+            mesh.polygon_edges.add((min(i1, i2), max(i1, i2)))
+            mesh.polygon_edges.add((min(i2, i3), max(i2, i3)))
+            mesh.polygon_edges.add((min(i3, i0), max(i3, i0)))
+
+
+def create_room_primitive(w=4.0, h=2.8, d=4.0,
+                          subdiv_w=4, subdiv_h=4, subdiv_d=4,
+                          side_wall='left',
+                          show_floor=True, show_back_wall=True, show_side_wall=True,
+                          name="Primitive Room Corner"):
+    """
+    Generates an interior 3-plane room corner primitive:
+      1. Floor / Ground plane (XZ at Y=0) with subdiv_w x subdiv_d sections
+      2. Back Wall plane (XY at Z=+hd) with subdiv_w x subdiv_h sections
+      3. Side Wall plane (YZ at X=+hw for Left or -hw for Right) with subdiv_d x subdiv_h sections
+    Provides an instant perspective guide for room interiors with adjustable wall section grids.
+    """
+    mesh = MeshData(name)
+    hw = max(0.05, float(w) * 0.5)
+    h_val = max(0.05, float(h))
+    hd = max(0.05, float(d) * 0.5)
+
+    sw = max(1, min(32, int(subdiv_w)))
+    sh = max(1, min(32, int(subdiv_h)))
+    sd = max(1, min(32, int(subdiv_d)))
+
+    mesh.vertices = []
+    mesh.faces = []
+    mesh.polygon_edges = set()
+    mesh.coplanar_edges = set()
+
+    # 1. Floor Plane (XZ at Y=0)
+    # p00: Front-Right (-hw, 0, -hd), p10: Front-Left (hw, 0, -hd)
+    # p11: Back-Left   ( hw, 0,  hd), p01: Back-Right (-hw, 0,  hd)
+    if show_floor:
+        _add_subdivided_quad_to_mesh(
+            mesh,
+            QVector3D(-hw, 0.0, -hd),
+            QVector3D( hw, 0.0, -hd),
+            QVector3D( hw, 0.0,  hd),
+            QVector3D(-hw, 0.0,  hd),
+            subs_u=sw, subs_v=sd
+        )
+
+    # 2. Back Wall Plane (XY at Z=+hd)
+    # p00: Bottom-Right (-hw, 0.0,  hd), p10: Bottom-Left (hw, 0.0,  hd)
+    # p11: Top-Left     ( hw, h_val, hd), p01: Top-Right (-hw, h_val, hd)
+    if show_back_wall:
+        _add_subdivided_quad_to_mesh(
+            mesh,
+            QVector3D(-hw, 0.0,   hd),
+            QVector3D( hw, 0.0,   hd),
+            QVector3D( hw, h_val, hd),
+            QVector3D(-hw, h_val, hd),
+            subs_u=sw, subs_v=sh
+        )
+
+    # 3. Side Wall Plane
+    # Left Wall at X = +hw (spans along Z and Y)
+    # p00: Bottom-Front (hw, 0.0, -hd), p10: Bottom-Back (hw, 0.0,  hd)
+    # p11: Top-Back     (hw, h_val, hd), p01: Top-Front (hw, h_val,-hd)
+    if show_side_wall:
+        side_lower = str(side_wall).lower()
+        if side_lower in ('left', 'both'):
+            _add_subdivided_quad_to_mesh(
+                mesh,
+                QVector3D(hw, 0.0,  -hd),
+                QVector3D(hw, 0.0,   hd),
+                QVector3D(hw, h_val, hd),
+                QVector3D(hw, h_val,-hd),
+                subs_u=sd, subs_v=sh
+            )
+        if side_lower in ('right', 'both'):
+            # Right Wall at X = -hw
+            _add_subdivided_quad_to_mesh(
+                mesh,
+                QVector3D(-hw, 0.0,   hd),
+                QVector3D(-hw, 0.0,  -hd),
+                QVector3D(-hw, h_val,-hd),
+                QVector3D(-hw, h_val, hd),
+                subs_u=sd, subs_v=sh
+            )
+
+    mesh.original_vertices = [(v.x(), v.y(), v.z()) for v in mesh.vertices]
+    mesh.compute_face_normals()
+    mesh.bbox_min = QVector3D(-hw, 0.0, -hd)
+    mesh.bbox_max = QVector3D(hw, h_val, hd)
+    mesh.center = QVector3D(0.0, h_val * 0.5, 0.0)
+    mesh.radius = math.sqrt(hw*hw + (h_val*0.5)**2 + hd*hd)
+    mesh.scale = 1.0
+    mesh.primitive_type = "Room"
+    mesh.primitive_params = {
+        "w": float(w), "h": float(h), "d": float(d),
+        "subdiv_w": int(sw), "subdiv_h": int(sh), "subdiv_d": int(sd),
+        "side_wall": side_wall,
+        "show_floor": bool(show_floor),
+        "show_back_wall": bool(show_back_wall),
+        "show_side_wall": bool(show_side_wall),
+    }
+    return mesh
+
+
 # -----------------------------------------------------------------------------
 # Geometric Helpers & Closed-Form Perspective Solvers
 # -----------------------------------------------------------------------------

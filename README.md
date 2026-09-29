@@ -18,10 +18,19 @@ Watch the short walkthrough on YouTube: [https://youtu.be/qMYg-C_WqQc](https://y
 
 ## Features
 
-- **Docked 3D Viewport:** Orbit, pan, zoom, and tweak FOV directly from the docker panel. Includes custom gradient or solid studio backgrounds, centered orbit pivot toggle, and complete display customization.
-- **Quick Actions Toolbar:** Customizable mini toolbar right below the viewport for fast one-click access to your favorite tools, lens presets, view angles, primitives, and sync toggles with custom colors, icons, and preset configurations.
-- **Ground Calibrator (4-Point & 5-Point Draw):** Match your 3D camera to any sketch or photo by pinning 4 corners on a ground plane, or use 5-Point Draw to define ground pins plus a 5th height point to solve perspective and object height simultaneously.
-- **Base Pivot & Bottom-Up Height:** Primitives (boxes, cylinders, pyramids, cones, spheres) rest cleanly on the ground plane at $Y = 0.0$; height adjustments grow from the bottom up without shifting the base.
+- **Docked 3D Viewport:** Orbit, pan, zoom, and tweak FOV directly from the docker panel. Includes custom gradient or solid studio backgrounds, compact centered orbit target pivot toggle, and complete display customization.
+- **Quick Actions Toolbar:** Responsive mini toolbar directly below the viewport featuring an auto-wrapping flow layout that never clips buttons on narrow docker sizes. Offers fast one-click access to tools, lens presets, view angles, primitives, and sync toggles with custom colors, icons, and preset configurations.
+- **Ground Calibrator & Perspective Matching:**
+  - **4-Point Ground Draw:** Match your 3D camera to any sketch or photo by pinning 4 corners on a ground plane to solve Yaw, Tilt, Roll, FOV, and distance.
+  - **5-Point Ground + Height:** Pin 4 corners for the base plus a 5th point to define vertical height and object scale in perspective simultaneously.
+  - **Interactive Horizon Line:** Grab and drag the horizon line directly on-screen to smoothly adjust camera eye-level tilt (pitch) in real time.
+  - **On-Screen Transform Gizmo & Modifiers:** Move (✥), Rotate (⟳), and Scale (⤢) the ground quad right inside the canvas preview. Supports intuitive shortcut modifiers:
+    - *Drag inside quad:* Move / Translate
+    - *Shift + Drag:* Proportional Scale
+    - *Ctrl / Alt + Drag:* Rotate around center
+  - **Aspect Ratio Presets:** Lock proportions to 1:1:1 Cube, 1:2:1 Standing Block, 1:3:1 Character, 2:1:3 Interior Room, 4:1:4 Wide Stage, or Freeform.
+  - **History Dropdown:** Quickly recall recently placed primitives and camera setups with dimensions and timestamps.
+- **Base Pivot & Bottom-Up Height:** Primitives (boxes, cylinders, pyramids, cones, spheres, planes) rest cleanly on the ground plane at $Y = 0.0$; height adjustments extrude upwards from the base without shifting position.
 - **Canvas Stamping & Live Sync:** Press Stamp to place the render onto a new paint layer, or leave Live Sync on so your active layer updates automatically whenever you move the camera.
 - **Render Modes:** Shaded planes, wireframe only (with quad detection to hide internal diagonal tris), shaded + wireframe, flat silhouette mask, and normal maps.
 - **Built-in Reference Models:** Asaro head bust, mannequin head, boxes, spheres, cylinders, and grids ready to use without importing files.
@@ -84,6 +93,19 @@ Watch the short walkthrough on YouTube: [https://youtu.be/qMYg-C_WqQc](https://y
    - **Mouse scroll:** Field of view (focal length)
    - **Shift + left drag:** Rotate the key light
 5. Click **Stamp** to drop the current view onto a layer in your layer stack. Create a layer above it and start painting.
+
+---
+
+## Ground Perspective Matching & Primitive Drawing
+
+1. Click **📐 Ground Rect** (or **📍 Ground 5P (H)**) in the docker or Quick Actions toolbar.
+2. In the interactive calibrator window:
+   - Click **✏️ Draw Rect** to drag an outline, or click **📍 4-Point Draw** to click 4 corners directly on your canvas sketch.
+   - For vertical height, use **📍 5-Point Draw** (click 4 base corners + 1 height point).
+   - Grab the yellow **Horizon Line** and drag up or down to align the camera's eye-level tilt.
+   - Use the **Center Gizmo** or canvas shortcuts (Shift+Drag to scale, Ctrl+Drag to rotate) to position the ground quad.
+3. Choose your object: align your **Loaded 3D Model** or create a 3D primitive (**Box**, **Cylinder**, **Sphere**, **Pyramid**, **Cone**, **Plane**).
+4. Click **✔ Place Model on Ground & Apply** to instantly orient the camera and place the object resting directly on your artwork's perspective plane.
 
 ---
 

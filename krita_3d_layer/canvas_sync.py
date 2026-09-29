@@ -1,6 +1,5 @@
 """
-canvas_sync.py - Handles rendering 3D models directly onto Krita's canvas layers.
-Interacts with Krita Python API (Document, Node, setPixelData).
+Renders and stamps the 3D viewport onto Krita paint layers.
 """
 
 from PyQt5.QtGui import QColor, QImage, QPainter
@@ -69,11 +68,43 @@ class CanvasSyncManager:
         return None
 
     @staticmethod
+    def ensure_layer_visible(layer_mode="named", layer_name="3D Perspective & Model"):
+        """
+        If the target Krita layer exists and is currently hidden, unhides it
+        and refreshes the document projection so changes are visible immediately.
+        """
+        doc = CanvasSyncManager.get_active_document()
+        if not doc:
+            return False
+        try:
+            target_node = None
+            if layer_mode == "active":
+                target_node = doc.activeNode()
+                if target_node and target_node.type() != "paintlayer":
+                    target_node = None
+            elif layer_mode == "named":
+                target_node = doc.nodeByName(layer_name)
+                if not target_node:
+                    active = doc.activeNode()
+                    if active and "3D" in active.name():
+                        target_node = active
+
+            if target_node and hasattr(target_node, "visible") and hasattr(target_node, "setVisible"):
+                if not target_node.visible():
+                    target_node.setVisible(True)
+                    doc.refreshProjection()
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
     def render_to_krita_layer(mesh, camera, lighting, renderer, render_style,
                               layer_mode="named", layer_name="3D Model Layer",
                               transparent_bg=True, custom_bg=None,
                               scale_factor=1.0, frame=None,
-                              grid_settings=None, draw_model=True):
+                              grid_settings=None, draw_model=True,
+                              object_transform=None):
         """
         Renders the 3D model and/or perspective grid onto a Krita paint layer.
         If frame=(fx, fy, fw, fh) is provided, limits rendering strictly within that frame.
@@ -104,7 +135,8 @@ class CanvasSyncManager:
                 height=render_h,
                 bg_color=bg,
                 grid_settings=grid_settings,
-                draw_model=draw_model
+                draw_model=draw_model,
+                object_transform=object_transform
             )
 
             # Compose onto full document canvas so everything outside frame is clear
@@ -132,7 +164,8 @@ class CanvasSyncManager:
                 height=render_h,
                 bg_color=bg,
                 grid_settings=grid_settings,
-                draw_model=draw_model
+                draw_model=draw_model,
+                object_transform=object_transform
             )
 
             if qimg.format() != QImage.Format_ARGB32:
@@ -159,6 +192,11 @@ class CanvasSyncManager:
                 final_name = f"{mesh.name if mesh else '3D'} Ref"
             target_node = doc.createNode(final_name, "paintlayer")
             doc.rootNode().addChildNode(target_node, None)
+
+        # Unhide layer if it is hidden so user sees updates immediately
+        if hasattr(target_node, "visible") and hasattr(target_node, "setVisible"):
+            if not target_node.visible():
+                target_node.setVisible(True)
 
         # Write pixel data to layer
         target_node.setPixelData(pixel_data, out_x, out_y, out_w, out_h)

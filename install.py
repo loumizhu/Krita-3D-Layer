@@ -1,8 +1,6 @@
 """
-install.py - Automatic Installer & Live Injector for Krita-3D-Layer.
-1. Installs plugin into %APPDATA%/krita/pykrita/
-2. Enables plugin in kritarc configuration
-3. Injects and activates plugin in the currently running Krita instance
+Installer script for Krita-3D-Layer.
+Copies files into Krita's pykrita directory and notifies running Krita instances.
 """
 
 import os
@@ -133,8 +131,12 @@ try:
     importlib.reload(krita_3d_layer.renderer)
     import krita_3d_layer.ground_calibrator
     importlib.reload(krita_3d_layer.ground_calibrator)
+    import krita_3d_layer.primitive_drawer
+    importlib.reload(krita_3d_layer.primitive_drawer)
     import krita_3d_layer.canvas_sync
     importlib.reload(krita_3d_layer.canvas_sync)
+    import krita_3d_layer.quick_toolbar
+    importlib.reload(krita_3d_layer.quick_toolbar)
     print("[Krita-3D-Layer] Reloaded modules successfully.")
 except Exception as e:
     print(f"[Krita-3D-Layer] Initial import: {{e}}")

@@ -1,6 +1,5 @@
 """
-mesh_loader.py - High performance 3D mesh parser for OBJ and STL formats.
-Zero external dependencies, utilizes PyQt5.QtGui.QVector3D.
+Mesh loading for OBJ, STL, and GLB/glTF files.
 """
 
 import os
@@ -103,13 +102,15 @@ class MeshData:
 
     def compute_coplanar_edges(self, threshold_degrees=1.5):
         """
-        Identify internal triangulation diagonals / coplanar edges.
-        If polygon_edges is defined (e.g. from OBJ quads/polygons), any edge
-        not in polygon_edges is an internal diagonal.
-        Otherwise (e.g. STL, GLB, triangulated OBJ), edges shared by two adjacent
-        faces whose dihedral angle is <= threshold_degrees are marked as coplanar diagonals.
+        Detect internal triangulation diagonals so quad wireframe mode can hide them.
+        Uses original polygon edges if defined (from OBJ quads), or pairs adjacent
+        triangles into quads using dihedral angle and shape similarity.
         """
         self.coplanar_edges = set()
+        if not self.faces or not self.vertices:
+            self.edge_to_faces = {}
+            return
+
         edge_to_faces = {}
         for fi, face in enumerate(self.faces):
             v0, v1, v2 = face[0], face[1], face[2]
@@ -123,17 +124,111 @@ class MeshData:
 
         self.edge_to_faces = edge_to_faces
         has_poly_edges = (self.polygon_edges is not None and len(self.polygon_edges) > 0)
-        cos_thresh = math.cos(math.radians(threshold_degrees))
 
-        for e, f_list in edge_to_faces.items():
-            if has_poly_edges:
+        if has_poly_edges:
+            for e in edge_to_faces.keys():
                 if e not in self.polygon_edges:
                     self.coplanar_edges.add(e)
-            elif len(f_list) == 2:
-                n1 = self.face_normals[f_list[0]]
-                n2 = self.face_normals[f_list[1]]
-                dot = n1.x() * n2.x() + n1.y() * n2.y() + n1.z() * n2.z()
-                if dot >= cos_thresh:
+            return
+
+        # Tris-to-Quads pairing algorithm
+        verts = self.vertices
+        faces = self.faces
+        normals = self.face_normals
+
+        def eval_quad(e, f0, f1):
+            n0 = normals[f0]
+            n1 = normals[f1]
+            dot_n = max(-1.0, min(1.0, QVector3D.dotProduct(n0, n1)))
+            dihedral_deg = math.degrees(math.acos(dot_n))
+            if dihedral_deg > 45.0:
+                return None
+
+            ea, eb = e[0], e[1]
+            vc = faces[f0][0] if faces[f0][0] not in e else (faces[f0][1] if faces[f0][1] not in e else faces[f0][2])
+            vd = faces[f1][0] if faces[f1][0] not in e else (faces[f1][1] if faces[f1][1] not in e else faces[f1][2])
+
+            pA = verts[ea]
+            pB = verts[eb]
+            pC = verts[vc]
+            pD = verts[vd]
+
+            ab = pB - pA
+            ac = pC - pA
+            ad = pD - pA
+            if QVector3D.dotProduct(QVector3D.crossProduct(ab, ac), QVector3D.crossProduct(ab, ad)) >= 0:
+                return None
+
+            cd = pD - pC
+            ca = pA - pC
+            cb = pB - pC
+            if QVector3D.dotProduct(QVector3D.crossProduct(cd, ca), QVector3D.crossProduct(cd, cb)) >= 0:
+                return None
+
+            e0 = pA - pC
+            e1 = pD - pA
+            e2 = pB - pD
+            e3 = pC - pB
+
+            l0 = e0.length()
+            l1 = e1.length()
+            l2 = e2.length()
+            l3 = e3.length()
+            if min(l0, l1, l2, l3) < 1e-6:
+                return None
+
+            dir0 = e0.normalized()
+            dir2 = (QVector3D(0, 0, 0) - e2).normalized()
+            dir1 = e1.normalized()
+            dir3 = (QVector3D(0, 0, 0) - e3).normalized()
+
+            par0 = max(0.0, QVector3D.dotProduct(dir0, dir2))
+            par1 = max(0.0, QVector3D.dotProduct(dir1, dir3))
+
+            ortho0 = abs(QVector3D.dotProduct(dir0, dir1))
+            ortho1 = abs(QVector3D.dotProduct(dir1, dir2))
+
+            ratio0 = min(l0, l2) / max(l0, l2)
+            ratio1 = min(l1, l3) / max(l1, l3)
+
+            diag_len = ab.length()
+            max_side = max(l0, l1, l2, l3)
+            diag_bonus = 0.0 if diag_len >= max_side * 0.95 else 1.0
+
+            score = (
+                math.radians(dihedral_deg) * 2.0 +
+                (1.0 - par0) * 2.0 + (1.0 - par1) * 2.0 +
+                (1.0 - ratio0) * 2.0 + (1.0 - ratio1) * 2.0 +
+                (ortho0 + ortho1) * 1.0 +
+                diag_bonus * 3.0
+            )
+            return score
+
+        candidates = []
+        for e, fl in edge_to_faces.items():
+            if len(fl) == 2:
+                s = eval_quad(e, fl[0], fl[1])
+                if s is not None:
+                    candidates.append((s, e, fl[0], fl[1]))
+
+        candidates.sort(key=lambda x: x[0])
+        used_faces = set()
+        for s, e, f0, f1 in candidates:
+            if f0 not in used_faces and f1 not in used_faces:
+                used_faces.add(f0)
+                used_faces.add(f1)
+                self.coplanar_edges.add(e)
+
+        # For any remaining flat coplanar regions <= threshold_degrees:
+        cos_thresh = math.cos(math.radians(threshold_degrees))
+        for e, fl in edge_to_faces.items():
+            if len(fl) == 2:
+                f0, f1 = fl[0], fl[1]
+                if f0 in used_faces and f1 in used_faces:
+                    continue
+                n0 = normals[f0]
+                n1 = normals[f1]
+                if QVector3D.dotProduct(n0, n1) >= cos_thresh:
                     self.coplanar_edges.add(e)
 
 

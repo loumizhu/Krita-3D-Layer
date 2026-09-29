@@ -1,6 +1,5 @@
 """
-extension.py - Krita Extension for Krita-3D-Layer.
-Provides menu actions under Tools -> Scripts and support for floating 3D Window.
+Extension menu entries for Tools -> Scripts.
 """
 
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout
@@ -53,6 +52,56 @@ class Krita3DLayerExtension(Extension):
             "tools/scripts"
         )
         manual_action.triggered.connect(self.show_manual)
+
+        draw_action = window.createAction(
+            "krita_3d_layer_draw_box",
+            "Draw 3D Box / Primitive...",
+            "tools/scripts"
+        )
+        draw_action.triggered.connect(self.draw_box)
+
+        ground_action = window.createAction(
+            "krita_3d_layer_ground_calibrator",
+            "3D Ground Rectangle Calibrator...",
+            "tools/scripts"
+        )
+        ground_action.triggered.connect(self.open_ground_calibrator)
+
+    def open_ground_calibrator(self):
+        """Shows the 3D layer docker and launches the Ground Rectangle Calibrator window."""
+        app = Krita.instance() if Krita else None
+        if app:
+            for d in app.dockers():
+                if d.objectName() == "krita_3d_layer_docker" or "3d layer" in d.windowTitle().lower():
+                    d.setVisible(True)
+                    d.raise_()
+                    if hasattr(d, '_open_ground_calibrator'):
+                        d._open_ground_calibrator()
+                        return
+                    elif hasattr(d, 'btn_ground'):
+                        d.btn_ground.click()
+                        return
+        self.show_dialog()
+        if self.dialog and hasattr(self.dialog, 'docker_widget'):
+            self.dialog.docker_widget._open_ground_calibrator()
+
+    def draw_box(self):
+        """Shows the 3D layer docker and launches the Draw 3D Box & Calibrator window."""
+        app = Krita.instance() if Krita else None
+        if app:
+            for d in app.dockers():
+                if d.objectName() == "krita_3d_layer_docker" or "3d layer" in d.windowTitle().lower():
+                    d.setVisible(True)
+                    d.raise_()
+                    if hasattr(d, '_open_primitive_drawer'):
+                        d._open_primitive_drawer(start_click_draw=True)
+                        return
+                    elif hasattr(d, 'btn_draw_box'):
+                        d.btn_draw_box.click()
+                        return
+        self.show_dialog()
+        if self.dialog and hasattr(self.dialog, 'docker_widget'):
+            self.dialog.docker_widget._open_primitive_drawer(start_click_draw=True)
 
     def show_dialog(self):
         if not self.dialog:

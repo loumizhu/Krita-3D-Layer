@@ -1,25 +1,17 @@
 """
-viewport.py - Interactive 3D Viewport Widget with camera navigation,
-framing, floor/ceiling perspective grids, and overlay controls.
-
-Features:
- - Orbit / Turntable / First-Person camera modes
- - Overlay nav buttons (orbit, pan, zoom, tilt)
- - Info bar with scrubbable labels (drag Y/P/D/F to change Yaw/Pitch/Distance/FOV)
- - Gizmo axis click → snap view along that axis
- - Fisheye crop circle, coordinate gizmo
+Interactive 3D viewport widget with camera navigation and perspective overlays.
 """
 
 import math
-from PyQt5.QtWidgets import QWidget, QSizePolicy, QToolTip
+from PyQt5.QtWidgets import QWidget, QSizePolicy, QToolTip, QPushButton
 from PyQt5.QtGui import (
-    QPainter, QColor, QFont, QPen, QBrush, QImage, QLinearGradient, QCursor
+    QPainter, QColor, QFont, QPen, QBrush, QImage, QLinearGradient, QCursor, QVector3D
 )
 from PyQt5.QtCore import Qt, QPoint, QRect, QPointF, pyqtSignal
 
 from .renderer import (
     Camera3D, Lighting3D, Renderer3D, RenderStyle,
-    PerspectiveGridSettings, ProjectionMode
+    PerspectiveGridSettings, ProjectionMode, ObjectTransform
 )
 
 # Camera navigation modes
@@ -28,6 +20,12 @@ CAMERA_MODE_TURNTABLE   = "Turntable (Locked Up)"
 CAMERA_MODE_FIRST_PERSON = "First Person (Look Around)"
 
 CAMERA_MODES = [CAMERA_MODE_ORBIT, CAMERA_MODE_TURNTABLE, CAMERA_MODE_FIRST_PERSON]
+
+# Orbit target modes (pivot point for camera rotation)
+ORBIT_TARGET_OBJECT      = "Object"
+ORBIT_TARGET_ORIGIN      = "Origin"
+ORBIT_TARGET_VIEW_CENTER = "View Center"
+ORBIT_TARGET_MODES = [ORBIT_TARGET_OBJECT, ORBIT_TARGET_ORIGIN, ORBIT_TARGET_VIEW_CENTER]
 
 # Info-bar scrub fields
 _INFO_FIELDS = [
@@ -53,12 +51,13 @@ class Viewport3D(QWidget):
         self.setMinimumSize(60, 60)
 
         # Core 3D engine
-        self.camera       = Camera3D()
-        self.lighting     = Lighting3D()
-        self.renderer     = Renderer3D()
-        self.mesh         = None
-        self.render_style = RenderStyle.SHADED_WIREFRAME
-        self.grid_settings = PerspectiveGridSettings()
+        self.camera           = Camera3D()
+        self.lighting         = Lighting3D()
+        self.renderer         = Renderer3D()
+        self.object_transform = ObjectTransform()
+        self.mesh             = None
+        self.render_style     = RenderStyle.SHADED_WIREFRAME
+        self.grid_settings    = PerspectiveGridSettings()
 
         # Camera navigation mode
         self.camera_mode = CAMERA_MODE_ORBIT
@@ -99,8 +98,46 @@ class Viewport3D(QWidget):
         self._gizmo_rects = {}
 
         # Viewport background
+        self.bg_use_gradient = True
         self.bg_color_top    = QColor(50, 56, 68)
         self.bg_color_bottom = QColor(24, 27, 34)
+
+        # UI toggles
+        self.show_overlay_buttons = True
+        self.show_gizmo           = True
+        self.show_top_labels      = True
+        self.show_orbit_button    = True
+        self.show_canvas_frame    = True
+
+        # Orbit Target Mode (pivot point for camera rotation)
+        self.orbit_target_mode = ORBIT_TARGET_OBJECT
+
+        # Small bottom-center toggle button for Orbit Target Mode
+        self.btn_orbit_target = QPushButton(self)
+        self.btn_orbit_target.setObjectName("btn_orbit_target")
+        self.btn_orbit_target.setCursor(Qt.PointingHandCursor)
+        self.btn_orbit_target.setStyleSheet("""
+            QPushButton#btn_orbit_target {
+                background: rgba(15, 23, 42, 215);
+                border: 1px solid rgba(56, 189, 248, 140);
+                border-radius: 3px;
+                color: #38bdf8;
+                font-family: 'Segoe UI';
+                font-size: 8px;
+                font-weight: bold;
+                padding: 0px 4px;
+            }
+            QPushButton#btn_orbit_target:hover {
+                background: rgba(30, 41, 59, 240);
+                border-color: #38bdf8;
+                color: #ffffff;
+            }
+            QPushButton#btn_orbit_target:pressed {
+                background: rgba(14, 116, 144, 250);
+            }
+        """)
+        self.btn_orbit_target.clicked.connect(self.toggle_orbit_target_mode)
+        self._update_orbit_target_button()
 
     # ------------------------------------------------------------------
     def set_mesh(self, mesh):
@@ -122,12 +159,117 @@ class Viewport3D(QWidget):
             self.canvas_aspect_ratio = float(frame_rect[2]) / float(frame_rect[3])
         self.update()
 
+    def clear_scene_frame(self):
+        self.set_scene_frame(None, "")
+
     def set_grid_settings(self, settings):
         self.grid_settings = settings
         self.update()
 
     def set_camera_mode(self, mode):
         self.camera_mode = mode
+
+    def toggle_orbit_target_mode(self):
+        modes = ORBIT_TARGET_MODES
+        curr_idx = modes.index(self.orbit_target_mode) if self.orbit_target_mode in modes else 0
+        new_mode = modes[(curr_idx + 1) % len(modes)]
+        self.set_orbit_target_mode(new_mode)
+
+    def set_orbit_target_mode(self, mode):
+        if mode not in ORBIT_TARGET_MODES:
+            mode = ORBIT_TARGET_OBJECT
+        self.orbit_target_mode = mode
+        self._apply_orbit_target_mode()
+        self._update_orbit_target_button()
+        self.camera_changed.emit()
+        self.update()
+
+    def _update_orbit_target_button(self):
+        if not hasattr(self, 'btn_orbit_target'):
+            return
+        if self.orbit_target_mode == ORBIT_TARGET_OBJECT:
+            self.btn_orbit_target.setText("⌖ Pivot: Obj")
+            self.btn_orbit_target.setToolTip(
+                "Orbit Pivot: Object Center\n"
+                "Rotating camera pivots around 3D model center.\n"
+                "Click to toggle: Origin (0,0,0) ➔ View Center ➔ Object"
+            )
+        elif self.orbit_target_mode == ORBIT_TARGET_ORIGIN:
+            self.btn_orbit_target.setText("⌖ Pivot: (0,0)")
+            self.btn_orbit_target.setToolTip(
+                "Orbit Pivot: World Origin (0,0,0)\n"
+                "Rotating camera pivots around world ground origin.\n"
+                "Click to toggle: View Center ➔ Object ➔ Origin"
+            )
+        elif self.orbit_target_mode == ORBIT_TARGET_VIEW_CENTER:
+            self.btn_orbit_target.setText("⌖ Pivot: View")
+            self.btn_orbit_target.setToolTip(
+                "Orbit Pivot: Viewport Screen Center\n"
+                "Rotating camera pivots around current screen look-at center.\n"
+                "Click to toggle: Object ➔ Origin ➔ View Center"
+            )
+        self._layout_bottom_controls()
+
+    def _apply_orbit_target_mode(self):
+        if self.orbit_target_mode == ORBIT_TARGET_ORIGIN:
+            self.camera.target_x = 0.0
+            self.camera.target_y = 0.0
+            self.camera.target_z = 0.0
+        elif self.orbit_target_mode == ORBIT_TARGET_OBJECT:
+            if self.mesh and self.mesh.vertices:
+                min_x = min_y = min_z = 1e9
+                max_x = max_y = max_z = -1e9
+                mat = self.object_transform.get_matrix() if hasattr(self, 'object_transform') and self.object_transform and not self.object_transform.is_identity() else None
+                for v in self.mesh.vertices:
+                    v_t = mat.map(v) if mat else v
+                    vx, vy, vz = v_t.x(), v_t.y(), v_t.z()
+                    if vx < min_x: min_x = vx
+                    if vx > max_x: max_x = vx
+                    if vy < min_y: min_y = vy
+                    if vy > max_y: max_y = vy
+                    if vz < min_z: min_z = vz
+                    if vz > max_z: max_z = vz
+                self.camera.target_x = (min_x + max_x) * 0.5
+                self.camera.target_y = (min_y + max_y) * 0.5
+                self.camera.target_z = (min_z + max_z) * 0.5
+            else:
+                self.camera.target_x = 0.0
+                self.camera.target_y = 0.0
+                self.camera.target_z = 0.0
+        elif self.orbit_target_mode == ORBIT_TARGET_VIEW_CENTER:
+            if abs(self.camera.pan_x) > 1e-4 or abs(self.camera.pan_y) > 1e-4:
+                rad_yaw = math.radians(self.camera.yaw)
+                rad_pitch = math.radians(self.camera.pitch)
+                eye = QVector3D(
+                    self.camera.target_x + self.camera.distance * math.cos(rad_pitch) * math.sin(rad_yaw),
+                    self.camera.target_y + self.camera.distance * math.sin(rad_pitch),
+                    self.camera.target_z + self.camera.distance * math.cos(rad_pitch) * math.cos(rad_yaw)
+                )
+                fwd = (QVector3D(self.camera.target_x, self.camera.target_y, self.camera.target_z) - eye).normalized()
+                right = QVector3D.crossProduct(fwd, QVector3D(0, 1, 0)).normalized()
+                cup = QVector3D.crossProduct(right, fwd).normalized()
+                new_t = QVector3D(self.camera.target_x, self.camera.target_y, self.camera.target_z) - right * self.camera.pan_x - cup * self.camera.pan_y
+                self.camera.target_x = new_t.x()
+                self.camera.target_y = new_t.y()
+                self.camera.target_z = new_t.z()
+                self.camera.pan_x = 0.0
+                self.camera.pan_y = 0.0
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_bottom_controls()
+
+    def _layout_bottom_controls(self):
+        w = self.width()
+        h = self.height()
+        if hasattr(self, 'btn_orbit_target'):
+            btn_h = 15
+            btn_w = max(42, self.btn_orbit_target.sizeHint().width() + 4)
+            # Center horizontally at the bottom of the viewport
+            bx = (w - btn_w) // 2
+            by = h - btn_h - 4
+            self.btn_orbit_target.setGeometry(bx, by, btn_w, btn_h)
+            self.btn_orbit_target.setVisible(getattr(self, 'show_orbit_button', True) and w > 80 and h > 45)
 
     # ------------------------------------------------------------------
     # Overlay buttons layout
@@ -201,8 +343,10 @@ class Viewport3D(QWidget):
         if self.mesh and self.mesh.vertices:
             min_x = min_y = min_z = float('inf')
             max_x = max_y = max_z = float('-inf')
+            mat = self.object_transform.get_matrix() if hasattr(self, 'object_transform') and self.object_transform and not self.object_transform.is_identity() else None
             for v in self.mesh.vertices:
-                vx, vy, vz = v.x(), v.y(), v.z()
+                v_t = mat.map(v) if mat else v
+                vx, vy, vz = v_t.x(), v_t.y(), v_t.z()
                 if vx < min_x: min_x = vx
                 if vx > max_x: max_x = vx
                 if vy < min_y: min_y = vy
@@ -400,7 +544,7 @@ class Viewport3D(QWidget):
                 self.camera.pan_y += dy * pan_speed * pan_mult
             elif self.active_overlay_action == "zoom":
                 zoom_speed = 0.005 * self.camera.distance
-                self.camera.distance = max(0.05, min(50.0, self.camera.distance + (dy - dx) * zoom_speed))
+                self.camera.distance = max(0.05, min(100.0, self.camera.distance + (dy - dx) * zoom_speed))
             elif self.active_overlay_action == "tilt":
                 tilt_speed = 0.5
                 drag_delta = -dy if abs(dy) >= abs(dx) else dx
@@ -449,7 +593,7 @@ class Viewport3D(QWidget):
         if self.drag_button == Qt.RightButton or \
            (self.drag_button == Qt.LeftButton and (mods & Qt.ControlModifier)):
             zoom_speed = 0.005 * self.camera.distance
-            self.camera.distance = max(0.01, min(50.0, self.camera.distance + (dy - dx) * zoom_speed))
+            self.camera.distance = max(0.01, min(100.0, self.camera.distance + (dy - dx) * zoom_speed))
             self.camera_changed.emit()
             self.update()
             return
@@ -490,7 +634,10 @@ class Viewport3D(QWidget):
                 self.camera.tilt  = 0.0
                 self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
                 self.camera.pitch = max(0.0, min(85.0, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
-            else:  # Orbit Around Object
+            else:  # Orbit Around Object / Target
+                if self.orbit_target_mode == ORBIT_TARGET_VIEW_CENTER:
+                    if abs(self.camera.pan_x) > 1e-4 or abs(self.camera.pan_y) > 1e-4:
+                        self._apply_orbit_target_mode()
                 self.camera.yaw   = (self.camera.yaw   + dx * orbit_speed * orbit_yaw_mult) % 360.0
                 self.camera.pitch = max(-89.9, min(89.9, self.camera.pitch + dy * orbit_speed * orbit_pitch_mult))
             self.camera_changed.emit()
@@ -586,14 +733,19 @@ class Viewport3D(QWidget):
         w = self.width()
         h = self.height()
 
-        # 1. Background gradient
-        bg_grad = QLinearGradient(0, 0, 0, h)
-        bg_grad.setColorAt(0.0, self.bg_color_top)
-        bg_grad.setColorAt(1.0, self.bg_color_bottom)
-        painter.fillRect(0, 0, w, h, bg_grad)
+        # 1. Background (gradient or solid)
+        if getattr(self, 'bg_use_gradient', True):
+            bg_grad = QLinearGradient(0, 0, 0, h)
+            bg_grad.setColorAt(0.0, self.bg_color_top)
+            bg_grad.setColorAt(1.0, self.bg_color_bottom)
+            painter.fillRect(0, 0, w, h, bg_grad)
+        else:
+            painter.fillRect(0, 0, w, h, self.bg_color_top)
 
-        # 2. Canvas framing guide
-        if self.show_canvas_frame and self.canvas_aspect_ratio and self.canvas_aspect_ratio > 0:
+        # 2. Canvas framing guide and render area
+        rw, rh = w, h
+        trans_x, trans_y = 0, 0
+        if getattr(self, 'show_canvas_frame', True) and self.canvas_aspect_ratio and self.canvas_aspect_ratio > 0:
             view_ratio = float(w) / float(h) if h > 0 else 1.0
             if view_ratio > self.canvas_aspect_ratio:
                 fw = int(h * self.canvas_aspect_ratio)
@@ -609,40 +761,48 @@ class Viewport3D(QWidget):
                 1.5 if self.scene_frame else 1.0, Qt.DashLine)
             painter.setPen(border_pen)
             painter.drawRect(fx, fy, fw, fh)
+            rw, rh = fw, fh
+            trans_x, trans_y = fx, fy
 
-        # 3. Perspective grid
-        ground_y = 0.0
-        if self.mesh and hasattr(self.mesh, 'bbox_min'):
-            ground_y = self.mesh.bbox_min.y()
+        if trans_x != 0 or trans_y != 0:
+            painter.save()
+            painter.translate(trans_x, trans_y)
+
+        # 3. Perspective grid (World ground plane at ground_y=0.0)
+        ground_y = float(getattr(self.camera, 'ground_y', 0.0))
         if self.grid_settings and (self.grid_settings.show_in_viewport or self.grid_settings.enabled):
             self.renderer.render_perspective_grid(
-                painter, self.camera, self.grid_settings, w, h, ground_y=ground_y)
+                painter, self.camera, self.grid_settings, rw, rh, ground_y=ground_y)
 
         # 4. 3D Model
         if self.mesh:
+            obj_xform = self.object_transform if hasattr(self, 'object_transform') else None
             self.renderer.render_scene(
                 painter, self.mesh, self.camera, self.lighting,
-                self.render_style, w, h)
+                self.render_style, rw, rh, object_transform=obj_xform)
         elif not (self.grid_settings and (self.grid_settings.show_in_viewport or self.grid_settings.enabled)):
             painter.setPen(QColor(180, 190, 205))
             painter.setFont(QFont("Segoe UI", 9))
-            painter.drawText(self.rect(), Qt.AlignCenter, "No 3D Model\n\nImport .obj / .glb / .stl")
+            painter.drawText(QRect(0, 0, rw, rh), Qt.AlignCenter, "No 3D Model\n\nImport .obj / .glb / .stl")
 
-        # 5. Coordinate Gizmo (bottom-left) with axis click detection
+        if trans_x != 0 or trans_y != 0:
+            painter.restore()
+
+        # 5. Coordinate Gizmo (bottom-left) with axis click detection (compact)
         self._gizmo_rects = {}
-        if self.show_gizmo:
-            gizmo_size = min(28, int(min(w, h) * 0.15))
-            if gizmo_size >= 10:
-                ox = gizmo_size + 8
-                oy = h - gizmo_size - 8
+        if getattr(self, 'show_gizmo', True):
+            gizmo_size = min(14, max(8, int(min(w, h) * 0.08)))
+            if gizmo_size >= 7:
+                ox = gizmo_size + 4
+                oy = h - gizmo_size - 4
                 self._draw_gizmo_with_hit_rects(painter, ox, oy, gizmo_size)
 
         # 6. Info overlay (top-left) with scrub highlights
-        if (self.mesh or (self.grid_settings and (self.grid_settings.enabled or self.grid_settings.show_in_viewport))) and w > 80 and h > 40:
+        if getattr(self, 'show_top_labels', True) and (self.mesh or (self.grid_settings and (self.grid_settings.enabled or self.grid_settings.show_in_viewport))) and w > 80 and h > 40:
             self._draw_info_bar(painter)
 
         # 7. Overlay nav buttons (right side)
-        if self.show_overlay_buttons:
+        if getattr(self, 'show_overlay_buttons', True):
             buttons = self._get_overlay_buttons()
             if buttons:
                 btn_font = QFont("Segoe UI", 8)
@@ -696,7 +856,7 @@ class Viewport3D(QWidget):
             painter.drawText(rect.adjusted(1, 1, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
 
     def _draw_gizmo_with_hit_rects(self, painter, ox, oy, size):
-        """Draw coordinate gizmo AND store per-axis click rects."""
+        """Draw coordinate gizmo AND store per-axis click rects (compact)."""
         import math as _math
         from PyQt5.QtGui import QVector4D, QFont as _QFont
 
@@ -716,25 +876,25 @@ class Viewport3D(QWidget):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # Underlay circle
+        # Underlay circle (compact)
         painter.setBrush(QBrush(QColor(15, 18, 25, 180)))
         painter.setPen(QPen(QColor(50, 56, 70), 1))
-        painter.drawEllipse(ox - size - 2, oy - size - 2, (size + 2) * 2, (size + 2) * 2)
+        painter.drawEllipse(ox - size - 1, oy - size - 1, (size + 1) * 2, (size + 1) * 2)
 
-        lbl_font = QFont("Segoe UI", 7, QFont.Bold)
+        lbl_font = QFont("Segoe UI", 6, QFont.Bold)
 
         self._gizmo_rects = {}
         for vec, color, label in axes:
             end_x = ox + vec.x() * size
             end_y = oy - vec.y() * size
 
-            painter.setPen(QPen(color, 2, Qt.SolidLine, Qt.RoundCap))
+            painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(ox, oy, int(end_x), int(end_y))
 
             # Label — draw with hover highlight if hovered
-            lx = int(end_x + (3 if vec.x() >= 0 else -9))
-            ly = int(end_y + (4 if vec.y() <= 0 else -2))
-            label_rect = QRect(lx - 2, ly - 9, 14, 12)
+            lx = int(end_x + (2 if vec.x() >= 0 else -7))
+            ly = int(end_y + (3 if vec.y() <= 0 else -2))
+            label_rect = QRect(lx - 2, ly - 7, 10, 10)
             self._gizmo_rects[label] = label_rect
 
             painter.setFont(lbl_font)

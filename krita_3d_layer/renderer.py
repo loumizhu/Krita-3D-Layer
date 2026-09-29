@@ -1,8 +1,5 @@
 """
-renderer.py - Software 3D rendering engine using PyQt5.QtGui.
-Supports linear perspective, orthographic, fisheye/curvilinear,
-cylindrical/panini projections, studio lighting, depth sorting,
-backface culling, and comprehensive 3D perspective grids.
+Software 3D rendering engine and perspective grid drawing using PyQt5 QPainter.
 """
 
 import math
@@ -23,13 +20,14 @@ class RenderStyle:
 
 
 class ProjectionMode:
-    PERSPECTIVE  = "Linear Perspective"
-    ORTHOGRAPHIC = "Orthographic"
-    FISHEYE      = "Fisheye / Curvilinear"      # replaces old Fisheye + 5-Point (merged)
-    ARTIST_5VP   = "Artist 5-VP (Arc Curves)"   # artist-style curvilinear with arc vanishing lines
-    CYLINDRICAL  = "Cylindrical (Panini)"
+    PERSPECTIVE    = "Linear Perspective"
+    ARTIST_LINEAR  = "Artist Perspective (Natural)"
+    ORTHOGRAPHIC   = "Orthographic"
+    FISHEYE        = "Fisheye / Curvilinear"      # replaces old Fisheye + 5-Point (merged)
+    ARTIST_5VP     = "Artist 5-VP (Arc Curves)"   # artist-style curvilinear with arc vanishing lines
+    CYLINDRICAL    = "Cylindrical (Panini)"
 
-    ALL = [PERSPECTIVE, ORTHOGRAPHIC, FISHEYE, ARTIST_5VP, CYLINDRICAL]
+    ALL = [PERSPECTIVE, ARTIST_LINEAR, ORTHOGRAPHIC, FISHEYE, ARTIST_5VP, CYLINDRICAL]
 
 
 def project_cam_coords(camera, xc, yc, zc, render_size, offset_x=0.0, offset_y=0.0,
@@ -60,6 +58,22 @@ def project_cam_coords(camera, xc, yc, zc, render_size, offset_x=0.0, offset_y=0
         tan_fov = math.tan(math.radians(max(5.0, min(160.0, camera.fov)) * 0.5))
         ndc_x = xc / (zc * tan_fov * aspect)
         ndc_y = yc / (zc * tan_fov)
+        ndc_z = (zc - camera.near_clip) / max(1.0, (camera.far_clip - camera.near_clip))
+        sx = (ndc_x + 1.0) * half_size + offset_x
+        sy = (1.0 - ndc_y) * half_size + offset_y
+        return QPointF(sx, sy), ndc_z
+
+    # ---- Artist Perspective (Natural / Perceptual) --------------------------
+    if proj_mode == ProjectionMode.ARTIST_LINEAR:
+        if zc <= getattr(camera, 'near_clip', 0.01):
+            return None, None
+        tan_fov = math.tan(math.radians(max(5.0, min(160.0, camera.fov)) * 0.5))
+        d = math.hypot(math.hypot(xc, yc), zc)
+        comp = getattr(camera, 'curvature', 0.45)
+        alpha = max(0.0, min(0.9, comp))
+        z_eff = zc * (1.0 - alpha) + d * alpha
+        ndc_x = xc / (z_eff * tan_fov * aspect)
+        ndc_y = yc / (z_eff * tan_fov)
         ndc_z = (zc - camera.near_clip) / max(1.0, (camera.far_clip - camera.near_clip))
         sx = (ndc_x + 1.0) * half_size + offset_x
         sy = (1.0 - ndc_y) * half_size + offset_y
@@ -171,7 +185,7 @@ def project_camera_point(camera, view_mat, x, y, z, render_size,
 
 def apply_projection_distortion(ndc_x, ndc_y, mode, curvature=0.65):
     """Legacy 2D distortion fallback."""
-    if mode in (ProjectionMode.PERSPECTIVE, ProjectionMode.ORTHOGRAPHIC):
+    if mode in (ProjectionMode.PERSPECTIVE, ProjectionMode.ARTIST_LINEAR, ProjectionMode.ORTHOGRAPHIC):
         return ndc_x, ndc_y
     r = math.sqrt(ndc_x * ndc_x + ndc_y * ndc_y)
     if r < 1e-6:
@@ -214,7 +228,74 @@ class PerspectiveGridSettings:
         self.grid_opacity = 0.85
         self.axis_colors = True
         self.fade_grid = False
-        self.horizon_always_horizontal = False
+
+class ObjectTransform:
+    """
+    World-space transform for the 3D model/primitive (Position, Rotation, Scale).
+    """
+    def __init__(self):
+        self.pos_x = 0.0
+        self.pos_y = 0.0
+        self.pos_z = 0.0
+        self.rot_x = 0.0
+        self.rot_y = 0.0
+        self.rot_z = 0.0
+        self.scale_x = 1.0
+        self.scale_y = 1.0
+        self.scale_z = 1.0
+
+    def reset_position(self):
+        self.pos_x = 0.0
+        self.pos_y = 0.0
+        self.pos_z = 0.0
+
+    def reset_rotation(self):
+        self.rot_x = 0.0
+        self.rot_y = 0.0
+        self.rot_z = 0.0
+
+    def reset_scale(self):
+        self.scale_x = 1.0
+        self.scale_y = 1.0
+        self.scale_z = 1.0
+
+    def reset(self):
+        self.reset_position()
+        self.reset_rotation()
+        self.reset_scale()
+
+    def is_identity(self):
+        return (abs(self.pos_x) < 1e-5 and abs(self.pos_y) < 1e-5 and abs(self.pos_z) < 1e-5 and
+                abs(self.rot_x) < 1e-5 and abs(self.rot_y) < 1e-5 and abs(self.rot_z) < 1e-5 and
+                abs(self.scale_x - 1.0) < 1e-5 and abs(self.scale_y - 1.0) < 1e-5 and abs(self.scale_z - 1.0) < 1e-5)
+
+    def get_matrix(self):
+        mat = QMatrix4x4()
+        # User coordinates:
+        # X: Horizontal on the grid (scene X)
+        # Y: Depth on the grid (scene Z)
+        # Z: Elevation height Up/Down (scene Y)
+        mat.translate(self.pos_x, self.pos_z, self.pos_y)
+        if self.rot_z != 0.0:
+            mat.rotate(self.rot_z, 0, 1, 0)
+        if self.rot_x != 0.0:
+            mat.rotate(self.rot_x, 1, 0, 0)
+        if self.rot_y != 0.0:
+            mat.rotate(self.rot_y, 0, 0, 1)
+        if self.scale_x != 1.0 or self.scale_y != 1.0 or self.scale_z != 1.0:
+            mat.scale(self.scale_x, self.scale_z, self.scale_y)
+        return mat
+
+    def get_rotation_matrix(self):
+        mat = QMatrix4x4()
+        if self.rot_z != 0.0:
+            mat.rotate(self.rot_z, 0, 1, 0)
+        if self.rot_x != 0.0:
+            mat.rotate(self.rot_x, 1, 0, 0)
+        if self.rot_y != 0.0:
+            mat.rotate(self.rot_y, 0, 0, 1)
+        return mat
+
 
 
 class Camera3D:
@@ -240,6 +321,7 @@ class Camera3D:
         self.target_x = 0.0
         self.target_y = 0.0
         self.target_z = 0.0
+        self.ground_y = 0.0
 
     def reset(self):
         self.yaw = 145.0
@@ -261,6 +343,7 @@ class Camera3D:
         self.target_x = 0.0
         self.target_y = 0.0
         self.target_z = 0.0
+        self.ground_y = 0.0
 
     def set_front(self):
         self.yaw = 180.0; self.pitch = 0.0; self.roll = 0.0; self.tilt = 0.0
@@ -363,7 +446,7 @@ class Renderer3D:
 
     def render_to_image(self, mesh, camera, lighting, style=RenderStyle.SHADED,
                         width=800, height=800, bg_color=None, grid_settings=None,
-                        draw_model=True):
+                        draw_model=True, object_transform=None):
         img = QImage(width, height, QImage.Format_ARGB32_Premultiplied)
         if bg_color is None or bg_color.alpha() == 0:
             img.fill(QColor(0, 0, 0, 0))
@@ -373,32 +456,43 @@ class Renderer3D:
         painter = QPainter(img)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        ground_y = 0.0
-        if mesh and hasattr(mesh, 'bbox_min'):
-            ground_y = mesh.bbox_min.y()
+        # Perspective Grid & Horizon (World ground plane at ground_y=0.0)
+        ground_y = float(getattr(camera, 'ground_y', 0.0))
 
         if grid_settings and (grid_settings.enabled or grid_settings.show_in_viewport):
             self.render_perspective_grid(painter, camera, grid_settings, width, height,
                                          ground_y=ground_y)
         if draw_model and mesh and mesh.vertices:
-            self.render_scene(painter, mesh, camera, lighting, style, width, height)
+            self.render_scene(painter, mesh, camera, lighting, style, width, height,
+                              object_transform=object_transform)
 
         painter.end()
         return img
 
-    def render_scene(self, painter, mesh, camera, lighting, style, width, height):
+    def render_scene(self, painter, mesh, camera, lighting, style, width, height,
+                     object_transform=None):
         if not mesh or not mesh.vertices or not mesh.faces:
             return
 
         proj_mode = getattr(camera, 'projection_mode', ProjectionMode.PERSPECTIVE)
-        is_curvilinear = (proj_mode not in (ProjectionMode.PERSPECTIVE, ProjectionMode.ORTHOGRAPHIC))
+        is_curvilinear = (proj_mode not in (ProjectionMode.PERSPECTIVE, ProjectionMode.ARTIST_LINEAR, ProjectionMode.ORTHOGRAPHIC))
 
         # For fisheye / curvilinear use full extent so model fills viewport
         render_size = max(width, height) if is_curvilinear else min(width, height)
         offset_x = (width  - render_size) * 0.5
         offset_y = (height - render_size) * 0.5
 
-        mvp, view_mat, model_mat = camera.get_matrices(render_size, render_size)
+        mvp, view_mat, _ = camera.get_matrices(render_size, render_size)
+        if object_transform and not object_transform.is_identity():
+            model_mat = object_transform.get_matrix()
+            rot_mat   = object_transform.get_rotation_matrix()
+            model_view = view_mat * model_mat
+            has_rot   = (abs(object_transform.rot_x) > 1e-4 or abs(object_transform.rot_y) > 1e-4 or abs(object_transform.rot_z) > 1e-4)
+        else:
+            model_view = view_mat
+            rot_mat   = None
+            has_rot   = False
+
         key_dir, fill_dir = lighting.get_light_directions(camera)
         ambient     = lighting.ambient
         diffuse     = lighting.diffuse
@@ -410,7 +504,7 @@ class Renderer3D:
         ndc_pts    = []
         for v in mesh.vertices:
             pt, ndc_z = project_camera_point(
-                camera, view_mat, v.x(), v.y(), v.z(),
+                camera, model_view, v.x(), v.y(), v.z(),
                 render_size, offset_x, offset_y, aspect=1.0)
             if pt is None:
                 screen_pts.append(QPointF(-9999.0, -9999.0))
@@ -441,11 +535,15 @@ class Renderer3D:
                 face_color = self.base_color
             elif is_normal_map:
                 norm = mesh.face_normals[i] if i < len(mesh.face_normals) else QVector3D(0, 1, 0)
+                if has_rot and rot_mat:
+                    norm = rot_mat.map(norm).normalized()
                 face_color = QColor(int((norm.x()*0.5+0.5)*255),
                                     int((norm.y()*0.5+0.5)*255),
                                     int((norm.z()*0.5+0.5)*255))
             elif not is_wire_only:
                 norm = mesh.face_normals[i] if i < len(mesh.face_normals) else QVector3D(0, 1, 0)
+                if has_rot and rot_mat:
+                    norm = rot_mat.map(norm).normalized()
                 dot_key  = max(0.0, norm.x()*key_dir.x()+norm.y()*key_dir.y()+norm.z()*key_dir.z())
                 dot_fill = max(0.0, norm.x()*fill_dir.x()+norm.y()*fill_dir.y()+norm.z()*fill_dir.z())
                 light_val = min(1.0, max(0.0, ambient + diffuse*dot_key + fill_weight*dot_fill))
@@ -476,15 +574,31 @@ class Renderer3D:
                 painter.setBrush(QBrush(f_color))
                 painter.drawPolygon(poly)
         elif is_shaded_wire:
-            # Draw shaded faces without wire stroke to eliminate internal cracks
+            # Draw shaded faces and their wireframe edges interleaved in painter's algorithm order.
+            # This ensures foreground faces naturally occlude all background edges (eliminates backface bleed).
+            wire_pen = QPen(self.wire_color, self.wire_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            coplanar = getattr(mesh, "coplanar_edges", set()) if self.hide_coplanar_edges else set()
             for _, face, f_color in visible_faces:
                 poly = QPolygonF([screen_pts[face[0]], screen_pts[face[1]], screen_pts[face[2]]])
                 painter.setPen(QPen(f_color, 0.7))
                 painter.setBrush(QBrush(f_color))
                 painter.drawPolygon(poly)
 
-        # Wireframe edges pass (for Wireframe and Shaded + Wireframe)
-        if is_shaded_wire or is_wire_only:
+                painter.setPen(wire_pen)
+                painter.setBrush(Qt.NoBrush)
+                v0, v1, v2 = face[0], face[1], face[2]
+                for e in ((v0, v1) if v0 < v1 else (v1, v0),
+                          (v1, v2) if v1 < v2 else (v2, v1),
+                          (v2, v0) if v2 < v0 else (v0, v2)):
+                    if self.hide_coplanar_edges and e in coplanar:
+                        continue
+                    pA = screen_pts[e[0]]
+                    pB = screen_pts[e[1]]
+                    if pA.x() > -9000 and pB.x() > -9000:
+                        painter.drawLine(pA, pB)
+
+        # Wireframe edges pass (for Wireframe Only mode)
+        if is_wire_only:
             wire_pen = QPen(self.wire_color, self.wire_width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(wire_pen)
             painter.setBrush(Qt.NoBrush)
@@ -530,7 +644,7 @@ class Renderer3D:
             return
 
         proj_mode      = getattr(camera, 'projection_mode', ProjectionMode.PERSPECTIVE)
-        is_curvilinear = (proj_mode not in (ProjectionMode.PERSPECTIVE, ProjectionMode.ORTHOGRAPHIC))
+        is_curvilinear = (proj_mode not in (ProjectionMode.PERSPECTIVE, ProjectionMode.ARTIST_LINEAR, ProjectionMode.ORTHOGRAPHIC))
         is_artist_5vp  = (proj_mode == ProjectionMode.ARTIST_5VP)
 
         # Key fix: use FULL size for curvilinear so grid fills entire viewport

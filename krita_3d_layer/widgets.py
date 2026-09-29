@@ -1,8 +1,5 @@
 """
-widgets.py - Custom UI widgets for Krita 3D Layer plugin.
-Includes:
-- CollapsibleSection: Elegant expandable/collapsible parameter section.
-- SphereLightWidget: Interactive 3D sphere with 3D directional arrow for intuitive light control.
+Custom UI widgets: CollapsibleSection and SphereLightWidget.
 """
 
 import math
@@ -14,7 +11,7 @@ from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QRadialGradient,
     QPolygonF, QFont, QPainterPath
 )
-from PyQt5.QtCore import Qt, QPoint, QPointF, pyqtSignal, QSize
+from PyQt5.QtCore import Qt, QPoint, QPointF, QRectF, QRect, pyqtSignal, QSize, QEvent
 
 
 class CollapsibleSection(QWidget):
@@ -277,7 +274,7 @@ class SphereLightWidget(QWidget):
             tip_pt = QPointF(tip_x, tip_y)
 
             if is_front:
-                # Vivid glowing golden arrow in front
+                # Arrow in front
                 shaft_pen = QPen(QColor(251, 191, 36), 2.2)
                 shaft_pen.setCapStyle(Qt.RoundCap)
                 painter.setPen(shaft_pen)
@@ -288,14 +285,14 @@ class SphereLightWidget(QWidget):
                 painter.setBrush(QBrush(QColor(255, 215, 0)))
                 painter.drawPolygon(QPolygonF([tip_pt, wing1, wing2]))
 
-                # Glowing Sun / Source Marker at tail
+                # Light source marker at tail
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QBrush(QColor(251, 191, 36, 100)))
                 painter.drawEllipse(QPointF(tail_x, tail_y), 5.5, 5.5)
                 painter.setBrush(QBrush(QColor(255, 245, 200)))
                 painter.drawEllipse(QPointF(tail_x, tail_y), 3.0, 3.0)
             else:
-                # Dimmer dashed arrow pointing behind sphere
+                # Arrow pointing behind sphere
                 shaft_pen = QPen(QColor(148, 163, 184, 180), 1.8, Qt.DashLine)
                 painter.setPen(shaft_pen)
                 painter.drawLine(QPointF(tail_x, tail_y), QPointF(base_x, base_y))
@@ -304,11 +301,11 @@ class SphereLightWidget(QWidget):
                 painter.setBrush(QBrush(QColor(148, 163, 184, 160)))
                 painter.drawPolygon(QPolygonF([tip_pt, wing1, wing2]))
 
-                # Translucent source marker
+                # Source marker
                 painter.setBrush(QBrush(QColor(148, 163, 184, 120)))
                 painter.drawEllipse(QPointF(tail_x, tail_y), 3.5, 3.5)
 
-        # 6. Small Degree Readout at bottom
+        # Degree readout
         painter.setPen(QColor(180, 195, 215))
         font = QFont()
         font.setPixelSize(9)
@@ -316,6 +313,78 @@ class SphereLightWidget(QWidget):
         painter.setFont(font)
         angle_str = f"{int(self.azimuth)}° | {int(self.elevation)}°"
         painter.drawText(0, int(h - 2), w, 12, Qt.AlignHCenter | Qt.AlignBottom, angle_str)
+
+class ScrubLabel(QLabel):
+    """
+    Click-and-drag label linked to a spinbox.
+    Dragging left/right scrubs the linked spinbox value.
+    Clicking without dragging focuses and selects all text in the spinbox for typing.
+    """
+    def __init__(self, text, spinbox=None, color="#38bdf8", parent=None):
+        super().__init__(text, parent)
+        self._spinbox = spinbox
+        self._drag_start_x = None
+        self._drag_start_val = 0
+        self._is_dragging = False
+        self.setCursor(Qt.SizeHorCursor)
+        self.setStyleSheet(
+            f"QLabel {{ color: {color}; font-weight: bold; font-size: 10px; }}"
+            f"QLabel:hover {{ color: #7dd3fc; }}"
+        )
+        self.setToolTip("Drag left/right to scrub, click to type")
+
+    def set_target(self, spinbox):
+        self._spinbox = spinbox
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._spinbox:
+            self._drag_start_x = event.globalPos().x()
+            self._drag_start_val = self._spinbox.value()
+            self._is_dragging = False
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_x is not None and (event.buttons() & Qt.LeftButton) and self._spinbox:
+            dx = event.globalPos().x() - self._drag_start_x
+            if not self._is_dragging and abs(dx) >= 3:
+                self._is_dragging = True
+            if self._is_dragging:
+                if hasattr(self._spinbox, "_apply_scrub_from"):
+                    self._spinbox._apply_scrub_from(self._drag_start_val, dx, event.modifiers())
+                elif isinstance(self._spinbox, QDoubleSpinBox):
+                    step = self._spinbox.singleStep() or 0.1
+                    factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
+                    delta = dx * (step / 5.0) * factor
+                    self._spinbox.setValue(self._drag_start_val + delta)
+                else:
+                    step = self._spinbox.singleStep() or 1
+                    factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
+                    delta = int(round(dx * (step / 5.0) * factor))
+                    if delta == 0 and abs(dx) >= 3:
+                        delta = 1 if dx > 0 else -1
+                    self._spinbox.setValue(int(self._drag_start_val + delta))
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._spinbox:
+            was_dragging = self._is_dragging
+            self._is_dragging = False
+            self._drag_start_x = None
+            if was_dragging:
+                event.accept()
+                return
+            # Click without dragging: focus and select all in the linked spinbox
+            self._spinbox.setFocus()
+            if hasattr(self._spinbox, 'lineEdit') and self._spinbox.lineEdit():
+                self._spinbox.lineEdit().setFocus()
+                self._spinbox.lineEdit().selectAll()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class ScrubbableSpinBox(QSpinBox):
@@ -328,58 +397,103 @@ class ScrubbableSpinBox(QSpinBox):
         super().__init__(parent)
         self.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.setAlignment(Qt.AlignCenter)
-        self._drag_start_pos = None
+        self.setCursor(Qt.SizeHorCursor)
+        self._drag_start_x = None
         self._drag_start_val = 0
         self._is_dragging = False
+        if self.lineEdit():
+            self.lineEdit().setCursor(Qt.SizeHorCursor)
+            self.lineEdit().installEventFilter(self)
 
-    def enterEvent(self, event):
-        if not self.hasFocus():
-            self.setCursor(Qt.SizeHorCursor)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        if not self._is_dragging:
-            self.unsetCursor()
-        super().leaveEvent(event)
+    def eventFilter(self, watched, event):
+        if watched == self.lineEdit():
+            etype = event.type()
+            if etype == QEvent.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self._drag_start_x = event.globalPos().x()
+                    self._drag_start_val = self.value()
+                    self._is_dragging = False
+                    return True
+            elif etype == QEvent.MouseMove:
+                if self._drag_start_x is not None and (event.buttons() & Qt.LeftButton):
+                    dx = event.globalPos().x() - self._drag_start_x
+                    if not self._is_dragging and abs(dx) >= 3:
+                        self._is_dragging = True
+                        self.setCursor(Qt.SizeHorCursor)
+                        self.lineEdit().setCursor(Qt.SizeHorCursor)
+                    if self._is_dragging:
+                        self._apply_scrub_from(self._drag_start_val, dx, event.modifiers())
+                        return True
+            elif etype == QEvent.MouseButtonRelease:
+                if event.button() == Qt.LeftButton and self._drag_start_x is not None:
+                    was_dragging = self._is_dragging
+                    self._is_dragging = False
+                    self._drag_start_x = None
+                    if was_dragging:
+                        self.setCursor(Qt.SizeHorCursor)
+                        self.lineEdit().setCursor(Qt.SizeHorCursor)
+                        return True
+                    else:
+                        self.lineEdit().setFocus()
+                        self.lineEdit().selectAll()
+                        self.lineEdit().setCursor(Qt.IBeamCursor)
+                        return True
+            elif etype == QEvent.FocusOut:
+                self.lineEdit().setCursor(Qt.SizeHorCursor)
+            elif etype == QEvent.Enter:
+                if not self.lineEdit().hasFocus():
+                    self.lineEdit().setCursor(Qt.SizeHorCursor)
+            elif etype == QEvent.Leave:
+                if not self._is_dragging and not self.lineEdit().hasFocus():
+                    self.lineEdit().unsetCursor()
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_start_pos = event.pos()
+            self._drag_start_x = event.globalPos().x()
             self._drag_start_val = self.value()
             self._is_dragging = False
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_start_pos and (event.buttons() & Qt.LeftButton):
-            dx = event.pos().x() - self._drag_start_pos.x()
+        if self._drag_start_x is not None and (event.buttons() & Qt.LeftButton):
+            dx = event.globalPos().x() - self._drag_start_x
             if not self._is_dragging and abs(dx) >= 3:
                 self._is_dragging = True
                 self.setCursor(Qt.SizeHorCursor)
-                if self.lineEdit():
-                    self.lineEdit().deselect()
             if self._is_dragging:
-                step = self.singleStep() or 1
-                factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
-                delta = int(dx * (step * 0.15 * factor))
-                new_val = min(self.maximum(), max(self.minimum(), self._drag_start_val + delta))
-                self.setValue(new_val)
+                self._apply_scrub_from(self._drag_start_val, dx, event.modifiers())
                 event.accept()
                 return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._is_dragging:
+        if event.button() == Qt.LeftButton and self._drag_start_x is not None:
+            was_dragging = self._is_dragging
             self._is_dragging = False
-            self._drag_start_pos = None
-            self.unsetCursor()
+            self._drag_start_x = None
+            if was_dragging:
+                self.setCursor(Qt.SizeHorCursor)
+                event.accept()
+                return
+            if self.lineEdit():
+                self.lineEdit().setFocus()
+                self.lineEdit().selectAll()
+                self.lineEdit().setCursor(Qt.IBeamCursor)
             event.accept()
             return
-        self._drag_start_pos = None
         super().mouseReleaseEvent(event)
-        # Click without dragging: select text for direct typing!
-        if self.lineEdit():
-            self.lineEdit().setFocus()
-            self.lineEdit().selectAll()
+
+    def _apply_scrub_from(self, start_val, dx, modifiers):
+        step = self.singleStep() or 1
+        factor = 0.2 if (modifiers & Qt.ControlModifier) else (5.0 if (modifiers & Qt.ShiftModifier) else 1.0)
+        delta = int(round(dx * (step / 5.0) * factor))
+        if delta == 0 and abs(dx) >= 3:
+            delta = 1 if dx > 0 else -1
+        new_val = min(self.maximum(), max(self.minimum(), int(start_val + delta)))
+        self.setValue(new_val)
 
 
 class ScrubbableDoubleSpinBox(QDoubleSpinBox):
@@ -390,58 +504,101 @@ class ScrubbableDoubleSpinBox(QDoubleSpinBox):
         super().__init__(parent)
         self.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.setAlignment(Qt.AlignCenter)
-        self._drag_start_pos = None
+        self.setCursor(Qt.SizeHorCursor)
+        self._drag_start_x = None
         self._drag_start_val = 0.0
         self._is_dragging = False
+        if self.lineEdit():
+            self.lineEdit().setCursor(Qt.SizeHorCursor)
+            self.lineEdit().installEventFilter(self)
 
-    def enterEvent(self, event):
-        if not self.hasFocus():
-            self.setCursor(Qt.SizeHorCursor)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        if not self._is_dragging:
-            self.unsetCursor()
-        super().leaveEvent(event)
+    def eventFilter(self, watched, event):
+        if watched == self.lineEdit():
+            etype = event.type()
+            if etype == QEvent.MouseButtonPress:
+                if event.button() == Qt.LeftButton:
+                    self._drag_start_x = event.globalPos().x()
+                    self._drag_start_val = self.value()
+                    self._is_dragging = False
+                    return True
+            elif etype == QEvent.MouseMove:
+                if self._drag_start_x is not None and (event.buttons() & Qt.LeftButton):
+                    dx = event.globalPos().x() - self._drag_start_x
+                    if not self._is_dragging and abs(dx) >= 3:
+                        self._is_dragging = True
+                        self.setCursor(Qt.SizeHorCursor)
+                        self.lineEdit().setCursor(Qt.SizeHorCursor)
+                    if self._is_dragging:
+                        self._apply_scrub_from(self._drag_start_val, dx, event.modifiers())
+                        return True
+            elif etype == QEvent.MouseButtonRelease:
+                if event.button() == Qt.LeftButton and self._drag_start_x is not None:
+                    was_dragging = self._is_dragging
+                    self._is_dragging = False
+                    self._drag_start_x = None
+                    if was_dragging:
+                        self.setCursor(Qt.SizeHorCursor)
+                        self.lineEdit().setCursor(Qt.SizeHorCursor)
+                        return True
+                    else:
+                        self.lineEdit().setFocus()
+                        self.lineEdit().selectAll()
+                        self.lineEdit().setCursor(Qt.IBeamCursor)
+                        return True
+            elif etype == QEvent.FocusOut:
+                self.lineEdit().setCursor(Qt.SizeHorCursor)
+            elif etype == QEvent.Enter:
+                if not self.lineEdit().hasFocus():
+                    self.lineEdit().setCursor(Qt.SizeHorCursor)
+            elif etype == QEvent.Leave:
+                if not self._is_dragging and not self.lineEdit().hasFocus():
+                    self.lineEdit().unsetCursor()
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._drag_start_pos = event.pos()
+            self._drag_start_x = event.globalPos().x()
             self._drag_start_val = self.value()
             self._is_dragging = False
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self._drag_start_pos and (event.buttons() & Qt.LeftButton):
-            dx = event.pos().x() - self._drag_start_pos.x()
+        if self._drag_start_x is not None and (event.buttons() & Qt.LeftButton):
+            dx = event.globalPos().x() - self._drag_start_x
             if not self._is_dragging and abs(dx) >= 3:
                 self._is_dragging = True
                 self.setCursor(Qt.SizeHorCursor)
-                if self.lineEdit():
-                    self.lineEdit().deselect()
             if self._is_dragging:
-                step = self.singleStep() or 0.1
-                factor = 0.2 if (event.modifiers() & Qt.ControlModifier) else (5.0 if (event.modifiers() & Qt.ShiftModifier) else 1.0)
-                delta = dx * (step * 0.1 * factor)
-                new_val = min(self.maximum(), max(self.minimum(), self._drag_start_val + delta))
-                self.setValue(new_val)
+                self._apply_scrub_from(self._drag_start_val, dx, event.modifiers())
                 event.accept()
                 return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._is_dragging:
+        if event.button() == Qt.LeftButton and self._drag_start_x is not None:
+            was_dragging = self._is_dragging
             self._is_dragging = False
-            self._drag_start_pos = None
-            self.unsetCursor()
+            self._drag_start_x = None
+            if was_dragging:
+                self.setCursor(Qt.SizeHorCursor)
+                event.accept()
+                return
+            if self.lineEdit():
+                self.lineEdit().setFocus()
+                self.lineEdit().selectAll()
+                self.lineEdit().setCursor(Qt.IBeamCursor)
             event.accept()
             return
-        self._drag_start_pos = None
         super().mouseReleaseEvent(event)
-        # Click without dragging: select text for direct typing!
-        if self.lineEdit():
-            self.lineEdit().setFocus()
-            self.lineEdit().selectAll()
+
+    def _apply_scrub_from(self, start_val, dx, modifiers):
+        step = self.singleStep() or 0.1
+        factor = 0.2 if (modifiers & Qt.ControlModifier) else (5.0 if (modifiers & Qt.ShiftModifier) else 1.0)
+        delta = dx * (step / 5.0) * factor
+        new_val = min(self.maximum(), max(self.minimum(), start_val + delta))
+        self.setValue(new_val)
 
 
 class ViewportResizeHandle(QWidget):
@@ -493,4 +650,466 @@ class ViewportResizeHandle(QWidget):
         p.setPen(Qt.NoPen)
         p.drawRoundedRect((w - grip_w) // 2, 2, grip_w, 3, 1.5, 1.5)
         p.end()
+
+
+class PositionGizmoWidget(QWidget):
+    """
+    Interactive 3D Position / Translation Gizmo widget.
+    Shows an isometric 3D coordinate cross:
+      - X Axis (Red)
+      - Y Axis (Green)
+      - Z Axis (Blue)
+    Allows click-and-drag interaction:
+      - Drag X/Y moves position in screen-plane.
+      - Shift + drag moves Z axis (depth).
+      - Double-click resets position to (0, 0, 0).
+    """
+    position_changed = pyqtSignal(float, float, float)
+    interaction_ended = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(48, 48)
+        self.setMaximumSize(68, 68)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setMouseTracking(True)
+        self.setToolTip("3D Position Gizmo\n• Drag to move X & Y\n• Shift+Drag to move Z\n• Double-click to reset (0, 0, 0)")
+
+        self.pos_x = 0.0
+        self.pos_y = 0.0
+        self.pos_z = 0.0
+
+        self.is_dragging = False
+        self.last_mouse_pos = QPoint()
+        self._hover_axis = None
+
+    def sizeHint(self):
+        return QSize(58, 58)
+
+    def set_position(self, x, y, z):
+        self.pos_x = float(x)
+        self.pos_y = float(y)
+        self.pos_z = float(z)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.last_mouse_pos = event.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if not self.is_dragging:
+            return
+
+        delta = event.pos() - self.last_mouse_pos
+        self.last_mouse_pos = event.pos()
+
+        # Sensitivity scale
+        factor = 0.015
+        if event.modifiers() & Qt.ShiftModifier:
+            # Shift drag moves Y (Depth on grid)
+            self.pos_y += -delta.y() * factor * 2.0
+            self.pos_x += delta.x() * factor
+        elif event.modifiers() & Qt.ControlModifier:
+            factor *= 0.2
+            self.pos_x += delta.x() * factor
+            self.pos_z -= delta.y() * factor  # Elevation
+        else:
+            self.pos_x += delta.x() * factor   # Horizontal on grid
+            self.pos_z -= delta.y() * factor   # Elevation
+
+        self.position_changed.emit(self.pos_x, self.pos_y, self.pos_z)
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self.is_dragging:
+            self.is_dragging = False
+            self.interaction_ended.emit()
+            event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self.pos_x = 0.0
+        self.pos_y = 0.0
+        self.pos_z = 0.0
+        self.position_changed.emit(self.pos_x, self.pos_y, self.pos_z)
+        self.interaction_ended.emit()
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+        cx = w * 0.5
+        cy = h * 0.5
+        radius = min(w, h) * 0.5 - 4.0
+
+        if radius < 10.0:
+            return
+
+        # Background circular bezel
+        bg_grad = QRadialGradient(cx, cy, radius, cx - radius * 0.2, cy - radius * 0.2)
+        bg_grad.setColorAt(0.0, QColor(36, 42, 54))
+        bg_grad.setColorAt(0.7, QColor(22, 26, 35))
+        bg_grad.setColorAt(1.0, QColor(14, 17, 23))
+
+        p.setBrush(QBrush(bg_grad))
+        p.setPen(QPen(QColor(60, 72, 92), 1.0))
+        p.drawEllipse(QPointF(cx, cy), radius, radius)
+
+        # Coordinate axes (isometric 3D: Z up, X right/down, Y left/down)
+        axis_len = radius * 0.72
+
+        # Z Axis (Blue, pointing up: angle -90°) - Elevation
+        z_tip = QPointF(cx, cy - axis_len)
+        p.setPen(QPen(QColor(59, 130, 246), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), z_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(96, 165, 250)))
+        p.drawEllipse(z_tip, 2.5, 2.5)
+
+        # X Axis (Red, pointing down-right: angle +30°) - Grid Horizontal
+        rad_x = math.radians(30.0)
+        x_tip = QPointF(cx + axis_len * math.cos(rad_x), cy + axis_len * math.sin(rad_x))
+        p.setPen(QPen(QColor(239, 68, 68), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), x_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(248, 113, 113)))
+        p.drawEllipse(x_tip, 2.5, 2.5)
+
+        # Y Axis (Green, pointing down-left: angle +150°) - Grid Depth
+        rad_y = math.radians(150.0)
+        y_tip = QPointF(cx + axis_len * math.cos(rad_y), cy + axis_len * math.sin(rad_y))
+        p.setPen(QPen(QColor(34, 197, 94), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), y_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(74, 222, 128)))
+        p.drawEllipse(y_tip, 2.5, 2.5)
+
+        # Center hub / origin dot
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(254, 240, 138)))
+        p.drawEllipse(QPointF(cx, cy), 3.0, 3.0)
+
+        # Small axis label letters
+        font = QFont("Segoe UI", 7)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor(96, 165, 250))
+        p.drawText(int(cx - 3), int(cy - axis_len - 1), "Z")
+        p.setPen(QColor(248, 113, 113))
+        p.drawText(int(x_tip.x() + 1), int(x_tip.y() + 4), "X")
+        p.setPen(QColor(74, 222, 128))
+        p.drawText(int(y_tip.x() - 6), int(y_tip.y() + 4), "Y")
+
+        # Subtle value indicator text at bottom
+        p.setPen(QColor(148, 163, 184, 180))
+        p.setFont(QFont("Segoe UI", 6))
+        p.drawText(0, int(h - 1), w, 8, Qt.AlignHCenter | Qt.AlignBottom, "POS")
+        p.end()
+
+
+class RotationGizmoWidget(QWidget):
+    """
+    Interactive 3D Rotation Gizmo widget.
+    Renders a shaded 3D trackball sphere with 3 gimbal rings:
+      - Pitch (Red X-ring)
+      - Yaw (Green Y-ring)
+      - Roll (Blue Z-ring)
+    Allows click-and-drag interaction:
+      - Horizontal drag rotates Yaw (Y).
+      - Vertical drag rotates Pitch (X).
+      - Shift + drag rotates Roll (Z).
+      - Double-click resets rotation to (0, 0, 0).
+    """
+    rotation_changed = pyqtSignal(float, float, float)
+    interaction_ended = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(48, 48)
+        self.setMaximumSize(68, 68)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setMouseTracking(True)
+        self.setToolTip("3D Rotation Gizmo\n• Drag Left/Right: Yaw (Y)\n• Drag Up/Down: Pitch (X)\n• Shift+Drag: Roll (Z)\n• Double-click to reset (0, 0, 0)")
+
+        self.rot_x = 0.0
+        self.rot_y = 0.0
+        self.rot_z = 0.0
+
+        self.is_dragging = False
+        self.last_mouse_pos = QPoint()
+
+    def sizeHint(self):
+        return QSize(58, 58)
+
+    def set_rotation(self, rx, ry, rz):
+        self.rot_x = float(rx)
+        self.rot_y = float(ry)
+        self.rot_z = float(rz)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.last_mouse_pos = event.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if not self.is_dragging:
+            return
+
+        delta = event.pos() - self.last_mouse_pos
+        self.last_mouse_pos = event.pos()
+
+        if event.modifiers() & Qt.ShiftModifier:
+            # Shift drag rotates Roll (Z)
+            self.rot_z = (self.rot_z + delta.x() * 1.5) % 360.0
+        else:
+            self.rot_y = (self.rot_y + delta.x() * 1.5) % 360.0
+            self.rot_x = (self.rot_x - delta.y() * 1.5) % 360.0
+
+        self.rotation_changed.emit(self.rot_x, self.rot_y, self.rot_z)
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self.is_dragging:
+            self.is_dragging = False
+            self.interaction_ended.emit()
+            event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self.rot_x = 0.0
+        self.rot_y = 0.0
+        self.rot_z = 0.0
+        self.rotation_changed.emit(self.rot_x, self.rot_y, self.rot_z)
+        self.interaction_ended.emit()
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+        cx = w * 0.5
+        cy = h * 0.5
+        radius = min(w, h) * 0.5 - 5.0
+
+        if radius < 10.0:
+            return
+
+        # 3D Shaded Trackball Body
+        sphere_grad = QRadialGradient(cx - radius * 0.3, cy - radius * 0.3, radius * 1.3)
+        sphere_grad.setColorAt(0.0, QColor(70, 80, 100))
+        sphere_grad.setColorAt(0.4, QColor(32, 38, 50))
+        sphere_grad.setColorAt(0.85, QColor(16, 20, 28))
+        sphere_grad.setColorAt(1.0, QColor(10, 12, 18))
+
+        p.setBrush(QBrush(sphere_grad))
+        p.setPen(QPen(QColor(55, 65, 85), 1.0))
+        p.drawEllipse(QPointF(cx, cy), radius, radius)
+
+        # Draw 3 Colored Rotation Gimbal Rings
+        # 1. Blue outer rim ring (Roll / Z)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(59, 130, 246, 200), 1.4))
+        p.drawEllipse(QPointF(cx, cy), radius * 0.94, radius * 0.94)
+
+        # 2. Green equator ring (Yaw / Y)
+        # Flattened ellipse tilted with pitch
+        p.setPen(QPen(QColor(34, 197, 94, 210), 1.5))
+        pitch_rad = math.radians(self.rot_x)
+        y_squash = max(0.12, abs(math.cos(pitch_rad)))
+        p.drawEllipse(QPointF(cx, cy), radius * 0.82, radius * 0.82 * y_squash)
+
+        # 3. Red meridian ring (Pitch / X)
+        p.setPen(QPen(QColor(239, 68, 68, 210), 1.5))
+        yaw_rad = math.radians(self.rot_y)
+        x_squash = max(0.12, abs(math.cos(yaw_rad)))
+        p.drawEllipse(QPointF(cx, cy), radius * 0.82 * x_squash, radius * 0.82)
+
+        # Center orientation axis needle (shows 3D direction)
+        rad_y = math.radians(self.rot_y)
+        rad_x = math.radians(self.rot_x)
+        dir_x = math.cos(rad_x) * math.sin(rad_y)
+        dir_y = -math.sin(rad_x)
+
+        needle_len = radius * 0.65
+        needle_tip = QPointF(cx + dir_x * needle_len, cy + dir_y * needle_len)
+        p.setPen(QPen(QColor(251, 191, 36), 1.8, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), needle_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(253, 230, 138)))
+        p.drawEllipse(needle_tip, 2.5, 2.5)
+
+        # Center hub
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(241, 245, 249, 220)))
+        p.drawEllipse(QPointF(cx, cy), 2.2, 2.2)
+
+        # Label at bottom
+        p.setPen(QColor(148, 163, 184, 180))
+        p.setFont(QFont("Segoe UI", 6))
+        p.drawText(0, int(h - 1), w, 8, Qt.AlignHCenter | Qt.AlignBottom, "ROT")
+        p.end()
+
+
+class ScaleGizmoWidget(QWidget):
+    """
+    Interactive 3D Scale Gizmo widget.
+    Shows 3D scale axes ending in cubic handles:
+      - X Axis (Red) with box handle
+      - Y Axis (Green) with box handle
+      - Z Axis (Blue) with box handle
+      - Center handle (Amber) for uniform scaling
+      - Dynamic wireframe bounding box visualizing scale proportions.
+    Allows click-and-drag interaction:
+      - Dragging scales uniformly.
+      - Shift + drag scales non-uniformly.
+      - Double-click resets scale to (1.0, 1.0, 1.0).
+    """
+    scale_changed = pyqtSignal(float, float, float)
+    interaction_ended = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(48, 48)
+        self.setMaximumSize(68, 68)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setMouseTracking(True)
+        self.setToolTip("3D Scale Gizmo\n• Drag right/up to scale up, left/down to scale down\n• Shift+Drag for independent X/Y scale\n• Double-click to reset (1.0, 1.0, 1.0)")
+
+        self.scale_x = 1.0
+        self.scale_y = 1.0
+        self.scale_z = 1.0
+
+        self.is_dragging = False
+        self.last_mouse_pos = QPoint()
+
+    def sizeHint(self):
+        return QSize(58, 58)
+
+    def set_scale(self, sx, sy, sz):
+        self.scale_x = max(0.01, float(sx))
+        self.scale_y = max(0.01, float(sy))
+        self.scale_z = max(0.01, float(sz))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = True
+            self.last_mouse_pos = event.pos()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if not self.is_dragging:
+            return
+
+        delta = event.pos() - self.last_mouse_pos
+        self.last_mouse_pos = event.pos()
+
+        if event.modifiers() & Qt.ShiftModifier:
+            # Shift drag scales X and Y independently
+            self.scale_x = max(0.01, min(100.0, self.scale_x + delta.x() * 0.02))
+            self.scale_y = max(0.01, min(100.0, self.scale_y - delta.y() * 0.02))
+        else:
+            # Default uniform scaling
+            delta_val = (delta.x() - delta.y()) * 0.015
+            factor = max(0.1, 1.0 + delta_val)
+            self.scale_x = max(0.01, min(100.0, self.scale_x * factor))
+            self.scale_y = max(0.01, min(100.0, self.scale_y * factor))
+            self.scale_z = max(0.01, min(100.0, self.scale_z * factor))
+
+        self.scale_changed.emit(self.scale_x, self.scale_y, self.scale_z)
+        self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self.is_dragging:
+            self.is_dragging = False
+            self.interaction_ended.emit()
+            event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        self.scale_x = 1.0
+        self.scale_y = 1.0
+        self.scale_z = 1.0
+        self.scale_changed.emit(self.scale_x, self.scale_y, self.scale_z)
+        self.interaction_ended.emit()
+        self.update()
+        event.accept()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+
+        w = self.width()
+        h = self.height()
+        cx = w * 0.5
+        cy = h * 0.5
+        radius = min(w, h) * 0.5 - 4.0
+
+        if radius < 10.0:
+            return
+
+        # Background circular bezel
+        bg_grad = QRadialGradient(cx, cy, radius, cx - radius * 0.2, cy - radius * 0.2)
+        bg_grad.setColorAt(0.0, QColor(36, 42, 54))
+        bg_grad.setColorAt(0.7, QColor(22, 26, 35))
+        bg_grad.setColorAt(1.0, QColor(14, 17, 23))
+
+        p.setBrush(QBrush(bg_grad))
+        p.setPen(QPen(QColor(60, 72, 92), 1.0))
+        p.drawEllipse(QPointF(cx, cy), radius, radius)
+
+        # Scale proportion wireframe box preview
+        # Normalized between 0.3 and 1.6
+        avg_scale = (self.scale_x + self.scale_y + self.scale_z) / 3.0
+        box_hw = max(4.0, min(radius * 0.75, radius * 0.35 * (self.scale_x / max(0.1, avg_scale))))
+        box_hh = max(4.0, min(radius * 0.75, radius * 0.35 * (self.scale_z / max(0.1, avg_scale))))
+
+        p.setPen(QPen(QColor(245, 158, 11, 80), 1.0, Qt.DashLine))
+        p.setBrush(QBrush(QColor(245, 158, 11, 20)))
+        p.drawRect(QRectF(cx - box_hw, cy - box_hh, box_hw * 2, box_hh * 2))
+
+        # 3 Scale Axes with Cubic Handles
+        axis_len = radius * 0.68
+
+        # Z Axis (Blue, pointing up) - Elevation Height
+        z_tip = QPointF(cx, cy - axis_len)
+        p.setPen(QPen(QColor(59, 130, 246), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), z_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(96, 165, 250)))
+        p.drawRect(QRectF(z_tip.x() - 2.5, z_tip.y() - 2.5, 5, 5))
+
+        # X Axis (Red, pointing down-right: 30°) - Grid Horizontal Width
+        rad_x = math.radians(30.0)
+        x_tip = QPointF(cx + axis_len * math.cos(rad_x), cy + axis_len * math.sin(rad_x))
+        p.setPen(QPen(QColor(239, 68, 68), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), x_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(248, 113, 113)))
+        p.drawRect(QRectF(x_tip.x() - 2.5, x_tip.y() - 2.5, 5, 5))
+
+        # Y Axis (Green, pointing down-left: 150°) - Grid Depth
+        rad_y = math.radians(150.0)
+        y_tip = QPointF(cx + axis_len * math.cos(rad_y), cy + axis_len * math.sin(rad_y))
+        p.setPen(QPen(QColor(34, 197, 94), 2.0, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx, cy), y_tip)
+        p.setPen(Qt.NoPen); p.setBrush(QBrush(QColor(74, 222, 128)))
+        p.drawRect(QRectF(y_tip.x() - 2.5, y_tip.y() - 2.5, 5, 5))
+
+        # Center uniform scale cube
+        p.setPen(QPen(QColor(254, 240, 138), 1.0))
+        p.setBrush(QBrush(QColor(245, 158, 11)))
+        p.drawRect(QRectF(cx - 3.0, cy - 3.0, 6.0, 6.0))
+
+        # Label at bottom
+        p.setPen(QColor(148, 163, 184, 180))
+        p.setFont(QFont("Segoe UI", 6))
+        p.drawText(0, int(h - 1), w, 8, Qt.AlignHCenter | Qt.AlignBottom, "SCALE")
+        p.end()
+
 

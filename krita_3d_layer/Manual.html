@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8"/>
-    <title>Krita 3D Layer Manual & Quick Guide</title>
+    <title>Krita 3D Layer — User Guide</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -13,47 +13,43 @@
             padding: 24px;
         }
         .container {
-            max-width: 860px;
+            max-width: 840px;
             margin: 0 auto;
             background: #ffffff;
-            padding: 32px 40px;
+            padding: 32px 36px;
             border-radius: 8px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
         }
         h1 {
             color: #0f172a;
-            border-bottom: 2px solid #3b82f6;
-            padding-bottom: 12px;
+            border-bottom: 2px solid #2563eb;
+            padding-bottom: 10px;
             margin-top: 0;
+            font-size: 24px;
         }
         h2 {
-            color: #1e40af;
+            color: #1e3a8a;
             border-bottom: 1px solid #e2e8f0;
             padding-bottom: 6px;
             margin-top: 28px;
+            font-size: 18px;
         }
         h3 {
             color: #2563eb;
-            margin-top: 20px;
+            margin-top: 18px;
+            font-size: 15px;
         }
         p, li {
             font-size: 14px;
             color: #334155;
         }
-        code, pre {
+        code {
             background-color: #f1f5f9;
             color: #0f172a;
             font-family: Consolas, "Courier New", monospace;
-            border-radius: 4px;
-        }
-        code {
             padding: 2px 5px;
             font-size: 13px;
-        }
-        pre {
-            padding: 12px;
-            overflow-x: auto;
-            border: 1px solid #cbd5e1;
+            border-radius: 4px;
         }
         table {
             width: 100%;
@@ -73,17 +69,13 @@
         tr:nth-child(even) {
             background-color: #f8fafc;
         }
-        .callout {
-            background-color: #eff6ff;
-            border-left: 4px solid #3b82f6;
-            padding: 12px 16px;
-            margin: 16px 0;
+        .note {
+            background-color: #f0fdf4;
+            border-left: 4px solid #16a34a;
+            padding: 10px 14px;
+            margin: 14px 0;
             border-radius: 0 4px 4px 0;
-        }
-        .callout-title {
-            font-weight: bold;
-            color: #1d4ed8;
-            margin-bottom: 4px;
+            font-size: 13px;
         }
         .kbd {
             display: inline-block;
@@ -94,129 +86,126 @@
             background-color: #f1f5f9;
             border: 1px solid #cbd5e1;
             border-radius: 3px;
-            box-shadow: 0 1px 1px rgba(0,0,0,0.1);
         }
     </style>
 </head>
 <body>
 <div class="container">
-    <h1>📦 Krita 3D Layer — User Manual</h1>
-    <p><strong>Krita 3D Layer</strong> is an interactive 3D reference viewer, perspective grid generator, and canvas renderer built natively for Krita. It allows digital artists, illustrators, and comic creators to place 3D models and mathematically accurate perspective grids directly onto Krita paint layers.</p>
+    <h1>Krita 3D Layer — User Guide</h1>
+    <p>Krita 3D Layer is an in-canvas reference tool. It gives you a lightweight 3D viewport inside a docker so you can pose models, check planes, set up perspective grids, and stamp the image directly onto your drawing layers without opening external 3D software.</p>
 
-    <div class="callout">
-        <div class="callout-title">🌍 Multi-Platform Compatibility</div>
-        <p><strong>Krita 3D Layer is 100% Cross-Platform!</strong> It works seamlessly on <strong>Windows</strong>, <strong>Linux</strong>, and <strong>macOS</strong>. It is built entirely using standard Python 3 and PyQt5 (bundled inside Krita) without any platform-dependent binaries or external C++ libraries.</p>
-    </div>
-
-    <h2>🚀 Quick Start Workflow</h2>
+    <h2>Getting Started</h2>
     <ol>
-        <li>Open Krita and create or open any document.</li>
-        <li>Open the docker: <strong>Settings &rarr; Dockers &rarr; 3D Layer</strong>.</li>
-        <li>Click <strong>📦 Primitives ▾ &rarr; Asaro Head</strong> to load the built-in reference model, or click <strong>📁 Import 3D</strong> to open any <code>.obj</code>, <code>.stl</code>, <code>.glb</code>, or <code>.gltf</code> model.</li>
-        <li>Select a preset from the <strong>PRESETS</strong> dropdown (e.g. <em>Default Studio 3/4</em>, <em>Dramatic Fisheye 180°</em>, or <em>5-Point Comic</em>) to automatically configure the view.</li>
-        <li>Interact with the 3D viewport (Left-drag to Orbit, Alt+Left or Middle-drag to Pan, Ctrl+Left or Right-drag to Zoom, Scroll to adjust FOV).</li>
-        <li>With <strong>Live Sync</strong> checked, the 3D model and perspective grids render continuously to your active Krita canvas layer!</li>
+        <li>Create or open any image in Krita.</li>
+        <li>Open the panel: <strong>Settings &rarr; Dockers &rarr; 3D Layer</strong>.</li>
+        <li>Click <strong>Asaro Head</strong> to load the built-in reference bust, or click <strong>Import 3D</strong> to pick an <code>.obj</code>, <code>.glb</code>, or <code>.stl</code> file from your disk.</li>
+        <li>Drag in the preview window to orbit and find the angle you want.</li>
+        <li>Click <strong>Stamp</strong> to drop the current view onto a new paint layer. You can also turn on <strong>Live Sync</strong> if you want your active layer to update continuously as you move the camera.</li>
     </ol>
 
-    <h2>🎮 Viewport Navigation & Shortcuts</h2>
+    <h2>Navigation & Shortcuts</h2>
     <table>
         <thead>
             <tr>
                 <th>Action</th>
-                <th>Mouse / Keyboard Shortcut</th>
-                <th>Description</th>
+                <th>Shortcut</th>
+                <th>Notes</th>
             </tr>
         </thead>
         <tbody>
             <tr>
-                <td><strong>Orbit Camera</strong></td>
+                <td><strong>Orbit</strong></td>
                 <td><span class="kbd">Left Click + Drag</span></td>
-                <td>Rotate the camera around the target object.</td>
+                <td>Tumble around the model.</td>
             </tr>
             <tr>
-                <td><strong>Pan Camera</strong></td>
+                <td><strong>Pan</strong></td>
                 <td><span class="kbd">Middle Click</span> or <span class="kbd">Alt + Left Drag</span></td>
-                <td>Translate the camera view horizontally and vertically.</td>
+                <td>Slide the view horizontally and vertically.</td>
             </tr>
             <tr>
-                <td><strong>Zoom Distance</strong></td>
+                <td><strong>Zoom</strong></td>
                 <td><span class="kbd">Right Click + Drag</span> or <span class="kbd">Ctrl + Left Drag</span></td>
-                <td>Move the camera closer to or further from the target.</td>
+                <td>Move the camera closer or farther away.</td>
             </tr>
             <tr>
-                <td><strong>Field of View (FOV)</strong></td>
-                <td><span class="kbd">Mouse Scroll Wheel</span></td>
-                <td>Change lens focal length / perspective distortion angle.</td>
+                <td><strong>Focal Length / FOV</strong></td>
+                <td><span class="kbd">Mouse Scroll</span></td>
+                <td>Adjust camera lens angle (telephoto vs wide-angle).</td>
             </tr>
             <tr>
-                <td><strong>Adjust Light</strong></td>
+                <td><strong>Rotate Light</strong></td>
                 <td><span class="kbd">Shift + Left Drag</span></td>
-                <td>Rotate directional studio key light azimuth and elevation.</td>
+                <td>Rotate the key light around the subject.</td>
             </tr>
             <tr>
-                <td><strong>Frame / Reset</strong></td>
-                <td><span class="kbd">Double Click Viewport</span></td>
-                <td>Comfortably frame the 3D model in the center of the viewport.</td>
+                <td><strong>Center / Frame</strong></td>
+                <td><span class="kbd">Double Click</span></td>
+                <td>Resets framing and centers the model.</td>
             </tr>
             <tr>
                 <td><strong>Resize Viewport</strong></td>
-                <td><span class="kbd">Drag Separator Handle</span></td>
-                <td>Freely expand or contract the viewport height right below the preview.</td>
+                <td><span class="kbd">Drag Bottom Bar</span></td>
+                <td>Drag the handle below the 3D preview to make it larger or smaller.</td>
             </tr>
         </tbody>
     </table>
 
-    <h2>⚙️ Presets & Configuration Storage</h2>
-    <h3>Where are parameters saved?</h3>
-    <p>Parameters and custom configurations are saved into JSON files in Krita's standard user data directory:</p>
+    <h2>Render Modes</h2>
     <ul>
-        <li><strong>Windows:</strong> <code>%APPDATA%\krita\krita_3d_layer_presets.json</code><br/>
-            (Usually <code>C:\Users\&lt;Username&gt;\AppData\Roaming\krita\krita_3d_layer_presets.json</code>)</li>
+        <li><strong>Shaded Planes:</strong> Shows flat shaded polygons. Useful for value grouping, shadow mapping, and blocking in lighting.</li>
+        <li><strong>Shaded + Wireframe:</strong> Combines lighting with ink wireframe edges so you can see both volume and surface flow.</li>
+        <li><strong>Wireframe:</strong> Transparent background with outer and quad lines. Great for line art tracing on a layer beneath your sketch.</li>
+        <li><strong>Quad Wire (Hide Diagonals):</strong> Automatically identifies and hides internal triangulation edges across quads so meshes look like clean Blender-style quad topologies.</li>
+        <li><strong>Silhouette:</strong> Flat solid shape fill. Good for thumbnailing and silhouette read checks.</li>
+        <li><strong>Normal Map:</strong> RGB color encoding of surface angles.</li>
+    </ul>
+
+    <h2>Perspective Grids</h2>
+    <p>The grid section lets you set up reference planes with or without an active 3D model:</p>
+    <ul>
+        <li><strong>Ground Grid:</strong> A checkered or line-based floor grid that stays grounded under your model.</li>
+        <li><strong>Ceiling Grid:</strong> An optional upper grid plane with adjustable height, helpful when sketching interior rooms or architecture.</li>
+        <li><strong>Horizon Line:</strong> A reference line showing eye level. In linear perspective it stays flat; in fisheye modes it curves with the lens tilt.</li>
+        <li><strong>Vertical Guides:</strong> Posts that connect floor intersections up to the ceiling for vertical alignment.</li>
+    </ul>
+
+    <h2>Fisheye & Curvilinear Views</h2>
+    <p>Under the projection dropdown you can switch from standard perspective to spherical or fisheye lenses:</p>
+    <ul>
+        <li><strong>Equidistant / Equisolid / Stereographic:</strong> Different lens mapping styles for wide-angle and manga background distortion.</li>
+        <li><strong>Curvature:</strong> Controls how strongly straight lines bend as they move toward the edges of the frame.</li>
+        <li><strong>Crop Circle:</strong> Adds a circular peephole border around the lens.</li>
+    </ul>
+
+    <h2>Draw 3D Primitive & Perspective Inferrer</h2>
+    <p>If you have sketched a box or building in your drawing and want an accurate 3D model placed in that exact perspective:</p>
+    <ol>
+        <li>Click <strong>Draw Box</strong> next to the Import button.</li>
+        <li>A calibration window opens showing your canvas sketch. Drag the corner handles to outline the base and top of your drawn box, or click <strong>4-Click Draw</strong> to tap the four corners directly.</li>
+        <li>The tool instantly detects your perspective style (1-Point, 2-Point, or 3-Point), calculates the exact Field of View (FOV) and 35mm lens equivalent, determines camera tilt and box rotation, and measures the width, height, and depth proportions.</li>
+        <li>Choose a primitive shape (Box, Cylinder, Sphere, or Pyramid) and click <strong>Create 3D Primitive & Calibrate Scene</strong>. The plugin creates that 3D object, matches your scene camera to your sketch, and stamps it right into place.</li>
+    </ol>
+
+    <h2>Lock 3D Size (FOV Calibration / Dolly Zoom)</h2>
+    <p>When you enable <strong>Lock 3D Size (FOV Calibration)</strong> under the Camera & Perspective section, adjusting the Field of View slider or clicking lens buttons (e.g. 14mm, 24mm, 50mm, 85mm, 135mm) automatically compensates camera distance using optical dolly zoom. Your 3D subject maintains its exact size and framing on the canvas while perspective compression smoothly expands or flattens around it.</p>
+
+    <h2>Ground Calibrator</h2>
+    <p>If you already have a sketch or background photo and want the 3D camera to match its perspective:</p>
+    <ol>
+        <li>Click <strong>Calibrate Ground...</strong> in the docker.</li>
+        <li>Move the four corner points so they line up with a known rectangular flat area in your picture (like a floor tile, rug, or table).</li>
+        <li>Click <strong>Apply to Camera & Grid</strong>. The tool calculates the camera pitch, yaw, roll, and focal length to match your sketch.</li>
+    </ol>
+
+    <h2>Presets</h2>
+    <p>When you find an angle or grid setup you want to reuse, click <strong>Save...</strong> to store it in your presets dropdown. Presets are saved locally as plain JSON:</p>
+    <ul>
+        <li><strong>Windows:</strong> <code>%APPDATA%\krita\krita_3d_layer_presets.json</code></li>
         <li><strong>Linux:</strong> <code>~/.local/share/krita/krita_3d_layer_presets.json</code></li>
         <li><strong>macOS:</strong> <code>~/Library/Application Support/krita/krita_3d_layer_presets.json</code></li>
     </ul>
-
-    <h3>Using the Preset System:</h3>
-    <ul>
-        <li><strong>Automatic Loading:</strong> Simply selecting any preset in the <strong>PRESETS</strong> dropdown immediately applies all camera angles (yaw, pitch, roll, tilt), distance, FOV, projection mode, fisheye curvature, grid planes, horizon visibility, studio lighting, and shading style.</li>
-        <li><strong>Save Custom Preset (💾 Save...):</strong> Click this button to save your current viewport setup under any custom name. It will be added to the dropdown and persisted permanently in your presets JSON file.</li>
-        <li><strong>Delete Custom Preset (🗑):</strong> Removes the selected custom preset from the JSON file. (Built-in presets are protected).</li>
-    </ul>
-
-    <h2>📐 3D Perspective Grids & Horizon Line</h2>
-    <ul>
-        <li><strong>Ground Floor Grid:</strong> Accurate 3D square tiles spanning the ground plane with full crossing lines across all quadrants.</li>
-        <li><strong>Ceiling Grid (Above):</strong> Renders a matching ceiling grid plane at an adjustable height above ground (ideal for rooms and architecture).</li>
-        <li><strong>Eye-Level Horizon Line:</strong> Guaranteed visible horizon guide. In linear perspective it draws a straight horizon line; in <strong>Fisheye</strong> and <strong>5-Point Curvilinear</strong> modes, it dynamically curves into a smooth lens arc as the camera tilts!</li>
-        <li><strong>Extend to Horizon:</strong> Extends primary grid lines deep towards vanishing points.</li>
-        <li><strong>Height Poles:</strong> Vertical perspective guide markers connecting ground to ceiling.</li>
-    </ul>
-
-    <h2>🐟 Fisheye & Curvilinear Projections</h2>
-    <ul>
-        <li><strong>Fisheye Lenses:</strong> Supports <em>Stereographic</em>, <em>Equisolid</em>, <em>Orthographic</em>, and <em>Equidistant</em> spherical lens mapping formulas.</li>
-        <li><strong>Curvature Strength:</strong> Control the intensity of barrel distortion — dial up to 150%–200% for intense dynamic manga and comic background curvature.</li>
-        <li><strong>Circular Vignette:</strong> Toggle circular peephole lens aperture mask.</li>
-        <li><strong>Lens Zoom:</strong> Zoom into the fisheye sphere to fill the rectangular frame.</li>
-    </ul>
-
-    <h2>🎨 Shading Styles & Silhouette Contours</h2>
-    <ul>
-        <li><strong>Shaded + Wireframe:</strong> Soft directional Lambertian shading with ink wireframe edges.</li>
-        <li><strong>Shaded:</strong> Clean planar shading, perfect for value studies.</li>
-        <li><strong>Wireframe:</strong> Transparent background wireframe with backface culling for line art tracing.</li>
-        <li><strong>Quad Wire (Hide Diagonals):</strong> Automatically hides internal triangulation diagonals on flat surfaces and quads for clean, Blender-style quad wireframe meshes.</li>
-        <li><strong>Silhouette:</strong> Flat solid silhouette mask for shape blocking.</li>
-        <li><strong>Contour Outline:</strong> Adjustable outer silhouette contour ink stroke.</li>
-    </ul>
-
-    <h2>🛠️ Ground Perspective Calibrator</h2>
-    <p>Align the 3D camera to an existing 2D drawing or photo:</p>
-    <ol>
-        <li>Click <strong>📐 Calibrate Ground...</strong> in the docker.</li>
-        <li>Drag the 4 corner pins to match any rectangular feature in your sketch or reference photo (e.g. a tabletop, floor tile, or rug).</li>
-        <li>Click <strong>Apply to Camera & Grid</strong> to automatically compute camera focal length (FOV), pitch, yaw, roll, and eye height!</li>
-    </ol>
+    <p>Selecting any preset from the list applies the camera, lighting, and grid values immediately.</p>
 </div>
 </body>
 </html>

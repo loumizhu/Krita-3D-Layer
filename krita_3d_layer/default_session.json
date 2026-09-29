@@ -67,12 +67,18 @@
   "transparent_bg": true,
   "custom_bg": "#ffffff",
   "sticky_viewport": true,
-  "sec_viewport_exp": false,
+  "show_top_labels": true,
+  "show_orbit_button": true,
+  "show_quick_toolbar": true,
+  "bg_use_gradient": true,
+  "bg_color_top": "#323844",
+  "bg_color_bottom": "#181b22",
   "sec_presets_exp": true,
   "sec_model_exp": true,
   "sec_cam_exp": true,
   "sec_canvas_exp": true,
   "sec_grid_exp": true,
   "sec_light_exp": false,
-  "sec_settings_exp": false
+  "sec_settings_exp": false,
+  "sec_viewport_settings_exp": false
 }

@@ -1,7 +1,5 @@
 """
-Krita-3D-Layer Plugin.
-Imports 3D models (OBJ, STL), renders them in an interactive 3D viewport,
-and stamps/draws them directly onto Krita's canvas layers.
+Krita 3D Layer - 3D reference docker and layer stamping plugin for Krita.
 """
 
 import sys
@@ -18,14 +16,14 @@ if Krita is not None:
 
         app = Krita.instance()
         if app:
-            # 1. Register Extension
+            # Register extension
             try:
                 extension = Krita3DLayerExtension(parent=app)
                 app.addExtension(extension)
             except Exception as e:
                 print(f"[Krita-3D-Layer] Notice adding extension: {e}", file=sys.stderr)
 
-            # 2. Register DockWidget
+            # Register docker
             try:
                 dock_pos = getattr(getattr(DockWidgetFactoryBase, 'DockPosition', DockWidgetFactoryBase), 'DockRight', 1)
                 app.addDockWidgetFactory(

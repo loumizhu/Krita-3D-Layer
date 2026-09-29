@@ -1,22 +1,116 @@
 """
-ground_calibrator.py - Ground Rectangle Perspective Matcher & Camera Calibrator.
-Allows artists to draw or adjust a 4-point ground rectangle directly on the canvas snapshot.
-Mathematically solves camera orientation (Yaw, Pitch/Tilt, Roll, FOV, Distance, Pan X/Y)
-and places the 3D model directly on top of that ground rectangle with live preview.
+Ground plane calibrator. Matches camera angles and FOV to a 4-point rectangle on canvas.
 """
 
+import os
+import json
 import math
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSizePolicy, QFrame, QCheckBox
+    QLabel, QSizePolicy, QFrame, QCheckBox, QApplication, QDesktopWidget
 )
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QPolygonF, QImage, QCursor,
     QVector3D, QVector4D, QMatrix4x4
 )
-from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
+from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal, QByteArray
 
-from .renderer import Camera3D, Lighting3D, Renderer3D, RenderStyle
+from .renderer import (
+    Camera3D, Lighting3D, Renderer3D, RenderStyle, project_camera_point,
+    ProjectionMode, ObjectTransform
+)
+from .primitive_drawer import create_box_primitive, create_pyramid_primitive, create_sphere_primitive
+
+
+def get_ground_dialog_geometry_file_path():
+    hdir = os.path.join(os.path.expanduser("~"), ".krita_3d_layer")
+    os.makedirs(hdir, exist_ok=True)
+    return os.path.join(hdir, "ground_dialog_geometry.json")
+
+
+def load_ground_dialog_geometry():
+    path = get_ground_dialog_geometry_file_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("geometry")
+        except Exception:
+            pass
+    return None
+
+
+def save_ground_dialog_geometry(geo_hex):
+    path = get_ground_dialog_geometry_file_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"geometry": geo_hex}, f)
+    except Exception:
+        pass
+
+
+def segments_intersect(p1, p2, p3, p4):
+    """Checks if line segment p1-p2 strictly intersects line segment p3-p4."""
+    def ccw(a, b, c):
+        return (c.y() - a.y()) * (b.x() - a.x()) > (b.y() - a.y()) * (c.x() - a.x())
+    return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
+
+
+def validate_ground_quad(p0, p1, p2, p3):
+    """
+    Validates a ground quad defined by 4 corner points:
+      p0: Front-Left (1 FL)
+      p1: Front-Right (2 FR)
+      p2: Back-Right (3 BR)
+      p3: Back-Left (4 BL)
+    Returns: (is_valid: bool, level: str, message: str)
+    """
+    pts = [p0, p1, p2, p3]
+
+    # 1. Area / Collinear check
+    area = 0.5 * abs(
+        (p0.x() * p1.y() - p1.x() * p0.y()) +
+        (p1.x() * p2.y() - p2.x() * p1.y()) +
+        (p2.x() * p3.y() - p3.x() * p2.y()) +
+        (p3.x() * p0.y() - p0.x() * p3.y())
+    )
+    if area < 100.0:
+        return False, "error", "⚠️ Points are collinear or too close together. Spread out the 4 pins to define a ground plane."
+
+    # 2. Self-intersecting edges (hourglass / bowtie)
+    if segments_intersect(p0, p1, p2, p3) or segments_intersect(p1, p2, p3, p0):
+        return False, "error", "⚠️ Edges cross each other (hourglass shape)! Pins must be placed in order: 1 FL ➔ 2 FR ➔ 3 BR ➔ 4 BL."
+
+    # 3. Convexity check (all corner turns must bend outward)
+    def cross_2d(oa, ob):
+        return (oa.x() * ob.y()) - (oa.y() * ob.x())
+
+    crosses = []
+    for i in range(4):
+        prev = pts[i]
+        curr = pts[(i + 1) % 4]
+        nxt = pts[(i + 2) % 4]
+        e1 = QPointF(curr.x() - prev.x(), curr.y() - prev.y())
+        e2 = QPointF(nxt.x() - curr.x(), nxt.y() - curr.y())
+        crosses.append(cross_2d(e1, e2))
+
+    has_pos = any(c > 1e-4 for c in crosses)
+    has_neg = any(c < -1e-4 for c in crosses)
+    if has_pos and has_neg:
+        return False, "error", "⚠️ Non-convex quad! In perspective, all 4 corners must bend outward. Please adjust pin positions."
+
+    # 4. Inverted X direction (Front-Right to the left of Front-Left)
+    if (p1.x() - p0.x()) < -10.0:
+        return False, "warn", "⚠️ Inverted Front Edge: Point 2 (FR) is to the left of Point 1 (FL). Click '🔄 Flip 180°' or swap pins."
+
+    # 5. Inverted perspective check (back edge significantly wider than front edge)
+    w_front = math.hypot(p1.x() - p0.x(), p1.y() - p0.y())
+    w_back = math.hypot(p2.x() - p3.x(), p2.y() - p3.y())
+    if (p3.y() < p0.y() and p2.y() < p1.y()) and w_front > 10.0:
+        if w_back > w_front * 1.55:
+            return True, "warn", "⚠️ Diverging perspective: Back edge is wider than front edge. Receding ground edges should narrow toward horizon."
+
+    return True, "success", "✔ Valid ground rectangle: Model placed cleanly on perspective ground."
 
 
 def line_equation(pa, pb):
@@ -55,15 +149,17 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         fx, fy, fw, fh = frame_rect
         cx = fx + fw * 0.5
         cy = fy + fh * 0.5
-        render_size = float(min(fw, fh))
+        view_size = min(float(fw), float(fh))
     else:
         w = float(width) if width > 0 else 1000.0
         h = float(height) if height > 0 else 1000.0
         cx = w * 0.5
         cy = h * 0.5
-        render_size = float(min(w, h))
+        view_size = min(w, h)
 
-    half_s = render_size * 0.5
+    # In Qt / OpenGL perspective(fov, aspect), fov is VERTICAL FOV.
+    # Therefore, focal length is always relative to half the view size:
+    half_size = view_size * 0.5
 
     # 2. Vanishing Points
     # Axis X (Front & Back): p0->p1 and p3->p2
@@ -87,7 +183,7 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         )
 
     # 4. Focal length and FOV recovery
-    f_base = half_s / math.tan(math.radians(max(5.0, min(160.0, current_fov)) * 0.5))
+    f_base = half_size / math.tan(math.radians(max(5.0, min(160.0, current_fov)) * 0.5))
     f = f_base
     solved_fov = current_fov
 
@@ -97,7 +193,7 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         dot = u1[0] * u2[0] + u1[1] * u2[1]
         if dot < -100.0:  # Orthogonal directions in perspective
             f_calc = math.sqrt(-dot)
-            calc_fov = 2.0 * math.atan(half_s / f_calc) * 180.0 / math.pi
+            calc_fov = 2.0 * math.atan(half_size / f_calc) * 180.0 / math.pi
             if 12.0 <= calc_fov <= 120.0:
                 f = f_calc
                 solved_fov = calc_fov
@@ -109,7 +205,7 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
     elif vp2:
         # 1-point perspective: Front/Back lines are parallel in screen space
         ray_Z = QVector3D(vp2.x() - cx, -(vp2.y() - cy), -f).normalized()
-        ray_X = QVector3D(p0.x() - p1.x(), -(p0.y() - p1.y()), 0.0).normalized()
+        ray_X = QVector3D(p1.x() - p0.x(), -(p1.y() - p0.y()), 0.0).normalized()
     elif vp1:
         # Side lines are parallel in screen space
         ray_X = QVector3D(vp1.x() - cx, -(vp1.y() - cy), -f).normalized()
@@ -119,71 +215,237 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         ray_X = QVector3D(1.0, 0.0, 0.0)
         ray_Z = QVector3D(0.0, 0.0, -1.0)
 
-    # Align ray directions with the model's coordinate frame:
-    # Model +X (right side of model) points from Front-Right (p1) to Front-Left (p0)
-    dir_2d_X = QVector3D(p0.x() - p1.x(), -(p0.y() - p1.y()), 0.0).normalized()
+    # Ensure ray_X points in direction p0 -> p1 (screen left to right)
+    dir_2d_X = QVector3D(p1.x() - p0.x(), -(p1.y() - p0.y()), 0.0).normalized()
     if QVector3D.dotProduct(ray_X, dir_2d_X) < 0:
         ray_X = -ray_X
 
+    # Ensure ray_Z points in direction p0 -> p3 (into screen towards horizon)
     dir_2d_Z = QVector3D(p3.x() - p0.x(), -(p3.y() - p0.y()), 0.0).normalized()
     if QVector3D.dotProduct(ray_Z, dir_2d_Z) < 0:
         ray_Z = -ray_Z
 
-    # 6. Ground Normal in camera view space (pointing up: N.y > 0)
-    N = QVector3D.crossProduct(ray_Z, ray_X).normalized()
+    # 6. Ground Normal in camera view space
+    N = QVector3D.crossProduct(ray_X, ray_Z).normalized()
     if N.y() < 0:
         N = -N
 
-    # 7. Pitch (tilt angle up/down) and Roll (camera tilt sideways)
-    pitch = math.degrees(math.atan2(N.z(), math.sqrt(N.x()**2 + N.y()**2)))
-    pitch = max(-89.0, min(89.0, pitch))
-
-    roll = -math.degrees(math.atan2(N.x(), N.y()))
-    roll = max(-89.0, min(89.0, roll))
+    # 7. Pitch and Roll
     if keep_horizon:
+        N = QVector3D(0.0, N.y(), N.z()).normalized()
         roll = 0.0
+    else:
+        roll = -math.degrees(math.atan2(N.x(), N.y()))
+        roll = max(-85.0, min(85.0, roll))
 
-    # 8. Yaw (azimuth rotation around world up)
-    # Project ray_X onto horizontal basis perpendicular to N
-    world_horiz_X = QVector3D(1.0, 0.0, 0.0)
-    h_X = (world_horiz_X - N * QVector3D.dotProduct(world_horiz_X, N)).normalized()
-    h_Z = QVector3D.crossProduct(N, h_X).normalized()
+    pitch = math.degrees(math.atan2(N.z(), math.sqrt(N.x()**2 + N.y()**2)))
+    pitch = max(-85.0, min(85.0, pitch))
 
-    x_prime = QVector3D.dotProduct(ray_X, h_X)
-    z_prime = QVector3D.dotProduct(ray_X, h_Z)
-    # Correct orientation so the front of the model faces forward towards the viewer
-    yaw = (math.degrees(math.atan2(z_prime, -x_prime))) % 360.0
+    # 8. Yaw (combining both axes for least-squares optimal alignment)
+    cos_pitch = max(0.01, math.cos(math.radians(pitch)))
+    # In Camera3D view space:
+    # ray_X points from p0 to p1 (towards world -X).
+    # ray_Z points from p0 to p3 (towards world +Z).
+    sin_yaw_X = -ray_X.z() / cos_pitch
+    cos_yaw_X = -ray_X.x()
+    sin_yaw_Z = -ray_Z.x()
+    cos_yaw_Z = ray_Z.z() / cos_pitch
+
+    if vp1 and vp2:
+        sin_yaw = (sin_yaw_X + sin_yaw_Z) * 0.5
+        cos_yaw = (cos_yaw_X + cos_yaw_Z) * 0.5
+    elif vp2:
+        sin_yaw = sin_yaw_Z
+        cos_yaw = cos_yaw_Z
+    else:
+        sin_yaw = sin_yaw_X
+        cos_yaw = cos_yaw_X
+
+    yaw = (math.degrees(math.atan2(sin_yaw, cos_yaw))) % 360.0
     if flip_yaw:
         yaw = (yaw + 180.0) % 360.0
 
-    # 9. Model Ground Alignment & Scale
-    ground_y = -1.0
-    base_width = 2.0
-    if mesh and hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
-        ground_y = mesh.bbox_min.y()
-        base_width = max(0.2, mesh.bbox_max.x() - mesh.bbox_min.x())
-
-    # Target points to the base of the model on the ground
-    target_x = 0.0
-    target_y = ground_y
-    target_z = 0.0
-
-    # 10. Distance calculation (matches model base width to quad width)
+    # 9. Ground Rectangle 3D Dimensions & Scaling
+    # Compute rays through p0, p1, p2, p3 and intersect with ground plane in camera view space
     w01 = math.hypot(p1.x() - p0.x(), p1.y() - p0.y())
     w32 = math.hypot(p2.x() - p3.x(), p2.y() - p3.y())
     quad_w = max(5.0, (w01 + w32) * 0.5)
 
-    # Perspective foreshortening factor for the X axis
     L_perp = max(0.15, math.sqrt(ray_X.x()**2 + ray_X.y()**2))
-    dist = f * (base_width * L_perp) / quad_w
+    dist = f * (2.0 * L_perp) / quad_w
     dist = max(0.2, min(50.0, dist))
 
-    # 11. Exact Camera Pan
-    # In camera space with pre-multiplied pan:
-    # sx = cx + f * (pan_x / dist)  =>  pan_x = ((sx - cx) / f) * dist
-    # sy = cy - f * (pan_y / dist)  =>  pan_y = -((sy - cy) / f) * dist
+    # Center ray and ground center in camera coordinates:
+    rc_len = math.sqrt((center_2d.x() - cx)**2 + (center_2d.y() - cy)**2 + f**2)
+    rc = QVector3D((center_2d.x() - cx) / rc_len, -(center_2d.y() - cy) / rc_len, -f / rc_len)
+    P_center = rc * dist
+
+    def _project_ray_to_plane(pt):
+        r_len = math.sqrt((pt.x() - cx)**2 + (pt.y() - cy)**2 + f**2)
+        ray = QVector3D((pt.x() - cx) / r_len, -(pt.y() - cy) / r_len, -f / r_len)
+        denom = QVector3D.dotProduct(N, ray)
+        if abs(denom) > 1e-4:
+            t = QVector3D.dotProduct(N, P_center) / denom
+            return ray * t
+        return P_center
+
+    P0 = _project_ray_to_plane(p0)
+    P1 = _project_ray_to_plane(p1)
+    P2 = _project_ray_to_plane(p2)
+    P3 = _project_ray_to_plane(p3)
+
+    rect_w = max(0.2, min(50.0, ((P1 - P0).length() + (P2 - P3).length()) * 0.5))
+    rect_d = max(0.2, min(50.0, ((P3 - P0).length() + (P2 - P1).length()) * 0.5))
+
+    ground_y = -1.0
+    target_x = 0.0
+    target_y = ground_y
+    target_z = 0.0
+    if mesh and hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
+        ground_y = mesh.bbox_min.y()
+        target_x = (mesh.bbox_min.x() + mesh.bbox_max.x()) * 0.5
+        target_y = ground_y
+        target_z = (mesh.bbox_min.z() + mesh.bbox_max.z()) * 0.5
+
+    ptype = getattr(mesh, 'primitive_type', None) if mesh else None
+    if ptype == "Box":
+        prev_h = 2.0
+        if hasattr(mesh, 'primitive_params') and 'h' in mesh.primitive_params:
+            prev_h = float(mesh.primitive_params['h'])
+        elif hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
+            prev_h = max(0.2, mesh.bbox_max.y() - mesh.bbox_min.y())
+        rect_h = max(0.2, min(50.0, prev_h))
+        sphere_radius = min(rect_w, rect_d) * 0.5
+    elif ptype == "Pyramid":
+        prev_h = 2.0
+        if hasattr(mesh, 'primitive_params') and 'h' in mesh.primitive_params:
+            prev_h = float(mesh.primitive_params['h'])
+        elif hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
+            prev_h = max(0.2, mesh.bbox_max.y() - mesh.bbox_min.y())
+        rect_h = max(0.2, min(50.0, prev_h))
+        sphere_radius = min(rect_w, rect_d) * 0.5
+    elif ptype == "Sphere":
+        sphere_radius = max(0.1, min(25.0, min(rect_w, rect_d) * 0.5))
+        rect_h = sphere_radius * 2.0
+    else:
+        rect_h = (rect_w + rect_d) * 0.5
+        sphere_radius = min(rect_w, rect_d) * 0.5
+
+    # Scale factors for imported 3D mesh:
+    if mesh and hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
+        orig_w = max(0.01, mesh.bbox_max.x() - mesh.bbox_min.x())
+        orig_d = max(0.01, mesh.bbox_max.z() - mesh.bbox_min.z())
+        orig_h = max(0.01, mesh.bbox_max.y() - mesh.bbox_min.y())
+        scale_x = max(0.01, min(100.0, rect_w / orig_w))
+        scale_z = max(0.01, min(100.0, rect_d / orig_d))
+        scale_y = (scale_x + scale_z) * 0.5
+    else:
+        scale_x = scale_y = scale_z = 1.0
+
+    # 10. Camera Pan
     pan_x = ((center_2d.x() - cx) / f) * dist
     pan_y = -((center_2d.y() - cy) / f) * dist
+
+    # 11. Fast Sub-Pixel Corner Refinement Optimization (Nelder-Mead simplex)
+    # Refines yaw, pitch, roll, dist, pan_x, pan_y using actual rect_w and rect_d
+    hw = rect_w * 0.5
+    hd = rect_d * 0.5
+    if not flip_yaw:
+        corners_3d = [
+            QVector3D(target_x + hw, ground_y, target_z - hd),  # p0: Front-Left
+            QVector3D(target_x - hw, ground_y, target_z - hd),  # p1: Front-Right
+            QVector3D(target_x - hw, ground_y, target_z + hd),  # p2: Back-Right
+            QVector3D(target_x + hw, ground_y, target_z + hd),  # p3: Back-Left
+        ]
+    else:
+        corners_3d = [
+            QVector3D(target_x - hw, ground_y, target_z + hd),  # p0: Back-Right (flipped)
+            QVector3D(target_x + hw, ground_y, target_z + hd),  # p1: Back-Left (flipped)
+            QVector3D(target_x + hw, ground_y, target_z - hd),  # p2: Front-Left (flipped)
+            QVector3D(target_x - hw, ground_y, target_z - hd),  # p3: Front-Right (flipped)
+        ]
+    target_pts = [p0, p1, p2, p3]
+
+    def _eval_error(params):
+        pyaw, ppitch, proll, pdist, ppx, ppy = params
+        if pdist < 0.1 or abs(ppitch) > 87.0:
+            return 1e9
+        r_yaw = math.radians(pyaw)
+        r_pitch = math.radians(ppitch)
+        eye = QVector3D(
+            target_x + pdist * math.cos(r_pitch) * math.sin(r_yaw),
+            pdist * math.sin(r_pitch) + target_y,
+            target_z + pdist * math.cos(r_pitch) * math.cos(r_yaw)
+        )
+        fwd = (QVector3D(target_x, target_y, target_z) - eye).normalized()
+        right = QVector3D.crossProduct(fwd, QVector3D(0, 1, 0)).normalized()
+        cup = QVector3D.crossProduct(right, fwd).normalized()
+        if abs(proll) > 1e-4:
+            r_roll = math.radians(proll)
+            cr = math.cos(r_roll); sr = math.sin(r_roll)
+            n_right = right * cr - cup * sr
+            n_up = right * sr + cup * cr
+            right, cup = n_right, n_up
+
+        tot_err = 0.0
+        for cp, tp in zip(corners_3d, target_pts):
+            rel = cp - eye
+            dfwd = QVector3D.dotProduct(rel, fwd)
+            if dfwd <= 0.01:
+                return 1e9
+            sx = cx + f * ((QVector3D.dotProduct(rel, right) + ppx) / dfwd)
+            sy = cy - f * ((QVector3D.dotProduct(rel, cup) + ppy) / dfwd)
+            tot_err += (sx - tp.x())**2 + (sy - tp.y())**2
+        return tot_err
+
+    init_params = [yaw, pitch, roll, dist, pan_x, pan_y]
+    steps = [2.0, 1.5, 0.0 if keep_horizon else 1.0, max(0.1, dist * 0.05), 0.05, 0.05]
+    dim = 6
+    simplex = [list(init_params)]
+    for d in range(dim):
+        pt = list(init_params)
+        pt[d] += steps[d]
+        simplex.append(pt)
+    scores = [_eval_error(pt) for pt in simplex]
+
+    for _ in range(80):
+        order = sorted(range(dim + 1), key=lambda idx: scores[idx])
+        simplex = [simplex[i] for i in order]
+        scores = [scores[i] for i in order]
+        if scores[0] < 0.1:
+            break
+        centroid = [sum(simplex[i][d] for i in range(dim)) / dim for d in range(dim)]
+        xr = [2.0 * centroid[d] - simplex[dim][d] for d in range(dim)]
+        if keep_horizon: xr[2] = 0.0
+        sr_score = _eval_error(xr)
+        if scores[0] <= sr_score < scores[dim - 1]:
+            simplex[dim] = xr; scores[dim] = sr_score; continue
+        if sr_score < scores[0]:
+            xe = [centroid[d] + 2.0 * (xr[d] - centroid[d]) for d in range(dim)]
+            if keep_horizon: xe[2] = 0.0
+            se_score = _eval_error(xe)
+            if se_score < sr_score:
+                simplex[dim] = xe; scores[dim] = se_score
+            else:
+                simplex[dim] = xr; scores[dim] = sr_score
+            continue
+        xc = [centroid[d] + 0.5 * (simplex[dim][d] - centroid[d]) for d in range(dim)]
+        if keep_horizon: xc[2] = 0.0
+        sc_score = _eval_error(xc)
+        if sc_score < scores[dim]:
+            simplex[dim] = xc; scores[dim] = sc_score; continue
+        for i in range(1, dim + 1):
+            simplex[i] = [simplex[0][d] + 0.5 * (simplex[i][d] - simplex[0][d]) for d in range(dim)]
+            if keep_horizon: simplex[i][2] = 0.0
+            scores[i] = _eval_error(simplex[i])
+
+    best = simplex[0]
+    yaw = best[0] % 360.0
+    pitch = max(-85.0, min(85.0, best[1]))
+    roll = 0.0 if keep_horizon else max(-85.0, min(85.0, best[2]))
+    dist = max(0.1, min(50.0, best[3]))
+    pan_x = best[4]
+    pan_y = best[5]
 
     # 12. Horizon line
     horizon = None
@@ -219,17 +481,105 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         "vp1": vp1,
         "vp2": vp2,
         "horizon": horizon,
-        "center_2d": center_2d
+        "center_2d": center_2d,
+        "rect_width": rect_w,
+        "rect_depth": rect_d,
+        "rect_height": rect_h,
+        "sphere_radius": sphere_radius,
+        "scale_x": scale_x,
+        "scale_y": scale_y,
+        "scale_z": scale_z,
+        "primitive_type": ptype,
+        "corners_3d": corners_3d,
     }
+
+
+def solve_height_from_point(camera, doc_w, doc_h, base_corner_3d, norm_pt, frame_rect=None):
+    """
+    Solves 3D height H given a 2D canvas normalized point and a 3D base corner position.
+    Uses true perspective projection matching the camera.
+    """
+    if not camera or doc_w <= 0 or doc_h <= 0 or norm_pt is None:
+        return 2.0
+    if frame_rect and len(frame_rect) == 4 and frame_rect[2] > 0 and frame_rect[3] > 0:
+        fx, fy, fw, fh = frame_rect
+        render_size = min(fw, fh)
+        offset_x = fx + (fw - render_size) * 0.5
+        offset_y = fy + (fh - render_size) * 0.5
+    else:
+        render_size = min(doc_w, doc_h)
+        offset_x = (doc_w - render_size) * 0.5
+        offset_y = (doc_h - render_size) * 0.5
+
+    _, view_mat, _ = camera.get_matrices(render_size, render_size)
+    bx, by, bz = base_corner_3d.x(), base_corner_3d.y(), base_corner_3d.z()
+    pt_base, _ = project_camera_point(camera, view_mat, bx, by, bz, render_size, offset_x, offset_y)
+    pt_test, _ = project_camera_point(camera, view_mat, bx, by + 1.0, bz, render_size, offset_x, offset_y)
+
+    if pt_base is None or pt_test is None:
+        return 2.0
+
+    target_pt = QPointF(norm_pt.x() * doc_w, norm_pt.y() * doc_h)
+    vx = pt_test.x() - pt_base.x()
+    vy = pt_test.y() - pt_base.y()
+    v_len_sq = vx * vx + vy * vy
+    if v_len_sq < 1e-4:
+        return 2.0
+
+    t = ((target_pt.x() - pt_base.x()) * vx + (target_pt.y() - pt_base.y()) * vy) / v_len_sq
+    if t <= 0.02:
+        return 0.1
+
+    low, high = 0.05, 50.0
+    best_h = 2.0
+    for _ in range(24):
+        mid = (low + high) * 0.5
+        pt_m, _ = project_camera_point(camera, view_mat, bx, by + mid, bz, render_size, offset_x, offset_y)
+        if pt_m is None:
+            high = mid
+            continue
+        tm = ((pt_m.x() - pt_base.x()) * vx + (pt_m.y() - pt_base.y()) * vy) / v_len_sq
+        if tm < t:
+            low = mid
+            best_h = mid
+        else:
+            high = mid
+            best_h = mid
+
+    return max(0.1, min(50.0, best_h))
+
+
+def project_height_to_norm_point(camera, doc_w, doc_h, base_corner_3d, height, frame_rect=None):
+    """Projects 3D height point above base corner back to 2D normalized document coordinates."""
+    if not camera or doc_w <= 0 or doc_h <= 0:
+        return QPointF(0.25, 0.5)
+    if frame_rect and len(frame_rect) == 4 and frame_rect[2] > 0 and frame_rect[3] > 0:
+        fx, fy, fw, fh = frame_rect
+        render_size = min(fw, fh)
+        offset_x = fx + (fw - render_size) * 0.5
+        offset_y = fy + (fh - render_size) * 0.5
+    else:
+        render_size = min(doc_w, doc_h)
+        offset_x = (doc_w - render_size) * 0.5
+        offset_y = (doc_h - render_size) * 0.5
+
+    _, view_mat, _ = camera.get_matrices(render_size, render_size)
+    bx, by, bz = base_corner_3d.x(), base_corner_3d.y(), base_corner_3d.z()
+    pt_top, _ = project_camera_point(camera, view_mat, bx, by + height, bz, render_size, offset_x, offset_y)
+    if pt_top is None:
+        return QPointF(0.25, 0.5)
+    return QPointF(max(0.001, min(0.999, pt_top.x() / doc_w)),
+                   max(0.001, min(0.999, pt_top.y() / doc_h)))
 
 
 class GroundCalibratorWidget(QWidget):
     """
     Interactive canvas widget that displays the canvas snapshot, allows dragging
-    the 4 ground quad corner pins, and renders a LIVE 3D PREVIEW of the model
-    sitting directly on top of the ground rectangle.
+    the 4 ground quad corner pins (and optional 5th height pin), and renders a LIVE 3D PREVIEW
+    of the model sitting directly on top of the ground rectangle.
     """
     solution_changed = pyqtSignal(dict)
+    guidance_changed = pyqtSignal(str, str)
 
     HANDLE_RADIUS = 8
 
@@ -250,9 +600,14 @@ class GroundCalibratorWidget(QWidget):
         self.active_handle = None
         self.hovered_handle = None
         self.is_picking_mode = False
+        self.pick_mode_points = 4
+        self.has_height_point = False
+        self.height_norm_pt = None
+        self.is_drag_mode = False
+        self.drag_start_pos = None
         self.picked_points = []
         self.keep_horizon = True
-        self.flip_yaw = True
+        self.flip_yaw = False
         self.current_cursor_pos = None
 
         # Current image rect within widget (for letterbox/aspect mapping)
@@ -260,15 +615,52 @@ class GroundCalibratorWidget(QWidget):
 
         # 4 ground points in normalized document coordinates [0, 1]
         # P0: Front-Left, P1: Front-Right, P2: Back-Right, P3: Back-Left
-        self.norm_points = [
+        self.norm_points = self._compute_initial_norm_points()
+
+        self.last_solution = {}
+        self._recalculate()
+
+    def _compute_initial_norm_points(self):
+        doc_w, doc_h = self._get_doc_size()
+        if (self.mesh and hasattr(self.mesh, 'bbox_min') and hasattr(self.mesh, 'bbox_max')
+                and self.camera and doc_w > 0 and doc_h > 0):
+            try:
+                ground_y = self.mesh.bbox_min.y()
+                hw = max(0.1, (self.mesh.bbox_max.x() - self.mesh.bbox_min.x()) * 0.5)
+                hd = max(0.1, (self.mesh.bbox_max.z() - self.mesh.bbox_min.z()) * 0.5)
+                tx = (self.mesh.bbox_min.x() + self.mesh.bbox_max.x()) * 0.5
+                tz = (self.mesh.bbox_min.z() + self.mesh.bbox_max.z()) * 0.5
+
+                corners = [
+                    QVector3D(tx + hw, ground_y, tz - hd),
+                    QVector3D(tx - hw, ground_y, tz - hd),
+                    QVector3D(tx - hw, ground_y, tz + hd),
+                    QVector3D(tx + hw, ground_y, tz + hd),
+                ]
+
+                render_size = min(doc_w, doc_h)
+                offset_x = (doc_w - render_size) * 0.5
+                offset_y = (doc_h - render_size) * 0.5
+                _, view_mat, _ = self.camera.get_matrices(render_size, render_size)
+
+                pts_norm = []
+                for c in corners:
+                    pt, ndc_z = project_camera_point(self.camera, view_mat, c.x(), c.y(), c.z(),
+                                                     render_size, offset_x, offset_y)
+                    if pt is not None and -0.1 * doc_w <= pt.x() <= 1.1 * doc_w and -0.1 * doc_h <= pt.y() <= 1.1 * doc_h:
+                        pts_norm.append(QPointF(max(0.01, min(0.99, pt.x() / doc_w)),
+                                                max(0.01, min(0.99, pt.y() / doc_h))))
+                if len(pts_norm) == 4:
+                    return pts_norm
+            except Exception:
+                pass
+
+        return [
             QPointF(0.25, 0.78),  # 0: Front-Left
             QPointF(0.75, 0.78),  # 1: Front-Right
             QPointF(0.62, 0.48),  # 2: Back-Right
             QPointF(0.38, 0.48),  # 3: Back-Left
         ]
-
-        self.last_solution = {}
-        self._recalculate()
 
     def set_keep_horizon(self, val):
         self.keep_horizon = bool(val)
@@ -285,10 +677,25 @@ class GroundCalibratorWidget(QWidget):
         self._recalculate()
         self.update()
 
-    def start_pick_mode(self):
-        self.is_picking_mode = True
+    def start_drag_mode(self):
+        """Activates click-and-drag ground rectangle mode."""
+        self.is_drag_mode = True
+        self.is_picking_mode = False
         self.picked_points = []
+        self.drag_start_pos = None
         self.setCursor(Qt.CrossCursor)
+        self.guidance_changed.emit("✏️ Draw Mode: Click and drag across the canvas to outline your ground rectangle.", "info")
+        self.update()
+
+    def start_pick_mode(self, num_points=4):
+        """Activates sequential 4-point or 5-point placement mode (FL, FR, BR, BL, [H])."""
+        self.is_picking_mode = True
+        self.pick_mode_points = max(4, min(5, int(num_points)))
+        self.is_drag_mode = False
+        self.picked_points = []
+        self.drag_start_pos = None
+        self.setCursor(Qt.CrossCursor)
+        self.guidance_changed.emit(f"👉 [Step 1 of {self.pick_mode_points}] Click the FRONT-LEFT (1 FL) corner of your ground rectangle.", "info")
         self.update()
 
     def reset_points(self):
@@ -298,7 +705,11 @@ class GroundCalibratorWidget(QWidget):
             QPointF(0.62, 0.48),
             QPointF(0.38, 0.48),
         ]
+        self.has_height_point = False
+        self.height_norm_pt = None
         self.is_picking_mode = False
+        self.is_drag_mode = False
+        self.drag_start_pos = None
         self.setCursor(Qt.ArrowCursor)
         self._recalculate()
         self.update()
@@ -311,6 +722,10 @@ class GroundCalibratorWidget(QWidget):
             QPointF(0.60, 0.50),
             QPointF(0.40, 0.50),
         ]
+        self.is_picking_mode = False
+        self.is_drag_mode = False
+        self.drag_start_pos = None
+        self.setCursor(Qt.ArrowCursor)
         self._recalculate()
         self.update()
 
@@ -359,13 +774,21 @@ class GroundCalibratorWidget(QWidget):
         return QPointF(max(0.001, min(0.999, nx)), max(0.001, min(0.999, ny)))
 
     def _get_widget_points(self):
-        return [
+        pts = [
             QPointF(
                 self.img_rect.x() + p.x() * self.img_rect.width(),
                 self.img_rect.y() + p.y() * self.img_rect.height()
             )
             for p in self.norm_points
         ]
+        if getattr(self, 'has_height_point', False) and getattr(self, 'height_norm_pt', None):
+            pts.append(
+                QPointF(
+                    self.img_rect.x() + self.height_norm_pt.x() * self.img_rect.width(),
+                    self.img_rect.y() + self.height_norm_pt.y() * self.img_rect.height()
+                )
+            )
+        return pts
 
     def _recalculate(self):
         doc_pts = self._get_doc_points()
@@ -380,28 +803,90 @@ class GroundCalibratorWidget(QWidget):
             keep_horizon=self.keep_horizon,
             flip_yaw=self.flip_yaw
         )
+
+        corners_3d = self.last_solution.get("corners_3d")
+        base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
+
+        # 5-point height calculation
+        if getattr(self, 'has_height_point', False):
+            if self.height_norm_pt is not None:
+                rh = solve_height_from_point(self.camera, doc_w, doc_h, base_corner_3d, self.height_norm_pt, self.frame_rect)
+                self.last_solution["rect_height"] = rh
+            else:
+                rh = self.last_solution.get("rect_height", 2.0)
+                self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
+        elif self.mesh and hasattr(self.mesh, 'primitive_params') and 'h' in self.mesh.primitive_params:
+            self.last_solution["rect_height"] = float(self.mesh.primitive_params['h'])
+
+        if not self.is_picking_mode and not self.is_drag_mode:
+            is_valid, level, msg = validate_ground_quad(doc_pts[0], doc_pts[1], doc_pts[2], doc_pts[3])
+            if is_valid:
+                ptype = self.last_solution.get("primitive_type")
+                rw = self.last_solution.get("rect_width", 2.0)
+                rd = self.last_solution.get("rect_depth", 2.0)
+                rh = self.last_solution.get("rect_height", 2.0)
+                h_note = f" × {rh:.2f} (H)" if getattr(self, 'has_height_point', False) else ""
+                if ptype == "Box":
+                    msg = f"✔ Perspective matched: Box resized to {rw:.2f} (W) × {rd:.2f} (D){h_note} on ground."
+                elif ptype == "Pyramid":
+                    msg = f"✔ Perspective matched: Pyramid base resized to {rw:.2f} (W) × {rd:.2f} (D){h_note} on ground."
+                elif ptype == "Sphere":
+                    sr = self.last_solution.get("sphere_radius", 1.0)
+                    msg = f"✔ Perspective matched: Sphere (radius {sr:.2f}) placed resting above ground rectangle."
+                elif self.mesh:
+                    msg = f"✔ Perspective matched: 3D model scaled to {rw:.2f} × {rd:.2f} footprint on ground rectangle."
+                else:
+                    msg = f"✔ Perspective matched: Ground rectangle {rw:.2f} × {rd:.2f}{h_note} solved."
+            self.guidance_changed.emit(msg, level)
+
         self.solution_changed.emit(self.last_solution)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape and self.is_picking_mode:
-            self.is_picking_mode = False
-            self.picked_points = []
-            self.setCursor(Qt.ArrowCursor)
-            self.update()
-            event.accept()
-            return
+        if event.key() == Qt.Key_Escape:
+            if self.is_picking_mode or self.is_drag_mode:
+                self.is_picking_mode = False
+                self.is_drag_mode = False
+                self.picked_points = []
+                self.drag_start_pos = None
+                self.setCursor(Qt.ArrowCursor)
+                self.guidance_changed.emit("Drawing mode cancelled. Drag handles to refine perspective.", "info")
+                self.update()
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             pos = event.pos()
 
-            # Sequential 4-point picking mode (Draw 4 points)
+            # 1. Sequential 4-point or 5-point picking mode
             if self.is_picking_mode:
                 norm_pt = self._widget_to_doc_norm(pos)
                 self.picked_points.append(norm_pt)
-                if len(self.picked_points) == 4:
-                    self.norm_points = list(self.picked_points)
+                n = len(self.picked_points)
+                target_count = getattr(self, 'pick_mode_points', 4)
+                if n == 1:
+                    self.guidance_changed.emit(f"👉 [Step 2 of {target_count}] Click the FRONT-RIGHT (2 FR) corner (to the right of Front-Left).", "info")
+                elif n == 2:
+                    self.guidance_changed.emit(f"👉 [Step 3 of {target_count}] Click the BACK-RIGHT (3 BR) corner (receding towards horizon).", "info")
+                elif n == 3:
+                    self.guidance_changed.emit(f"👉 [Step 4 of {target_count}] Click the BACK-LEFT (4 BL) corner (receding towards horizon, left of Back-Right).", "info")
+                elif n == 4:
+                    if target_count == 4:
+                        self.norm_points = list(self.picked_points[:4])
+                        self.has_height_point = False
+                        self.height_norm_pt = None
+                        self.is_picking_mode = False
+                        self.setCursor(Qt.ArrowCursor)
+                        self._recalculate()
+                    else:
+                        self.norm_points = list(self.picked_points[:4])
+                        self._recalculate()
+                        self.guidance_changed.emit("👉 [Step 5 of 5] Click to define HEIGHT (5 H) (above Front-Left corner in perspective).", "info")
+                elif n == 5:
+                    self.norm_points = list(self.picked_points[:4])
+                    self.has_height_point = True
+                    self.height_norm_pt = self.picked_points[4]
                     self.is_picking_mode = False
                     self.setCursor(Qt.ArrowCursor)
                     self._recalculate()
@@ -409,7 +894,13 @@ class GroundCalibratorWidget(QWidget):
                 event.accept()
                 return
 
-            # Check handle hits
+            # 2. Click-and-drag ground rectangle mode
+            if self.is_drag_mode:
+                self.drag_start_pos = pos
+                event.accept()
+                return
+
+            # 3. Check handle hits
             pts = self._get_widget_points()
             for idx, pt in enumerate(pts):
                 dist = (pt - QPointF(pos)).manhattanLength()
@@ -429,9 +920,36 @@ class GroundCalibratorWidget(QWidget):
             event.accept()
             return
 
+        if self.is_drag_mode and self.drag_start_pos:
+            p0 = self._widget_to_doc_norm(self.drag_start_pos)
+            p1 = self._widget_to_doc_norm(pos)
+            x0, x1 = min(p0.x(), p1.x()), max(p0.x(), p1.x())
+            y0, y1 = min(p0.y(), p1.y()), max(p0.y(), p1.y())
+            mx = (x0 + x1) * 0.5
+            hw = (x1 - x0) * 0.5
+            self.norm_points = [
+                QPointF(x0, y1),
+                QPointF(x1, y1),
+                QPointF(mx + hw * 0.75, y0),
+                QPointF(mx - hw * 0.75, y0)
+            ]
+            self._recalculate()
+            self.update()
+            event.accept()
+            return
+
         if self.active_handle is not None:
             norm_pt = self._widget_to_doc_norm(pos)
-            self.norm_points[self.active_handle] = norm_pt
+            if self.active_handle < 4:
+                self.norm_points[self.active_handle] = norm_pt
+                if getattr(self, 'has_height_point', False):
+                    corners_3d = self.last_solution.get("corners_3d")
+                    base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
+                    rh = self.last_solution.get("rect_height", 2.0)
+                    doc_w, doc_h = self._get_doc_size()
+                    self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
+            elif self.active_handle == 4:
+                self.height_norm_pt = norm_pt
             self._recalculate()
             self.update()
             event.accept()
@@ -446,7 +964,7 @@ class GroundCalibratorWidget(QWidget):
                 self.hovered_handle = idx
                 self.setCursor(Qt.PointingHandCursor)
                 break
-        if self.hovered_handle is None:
+        if self.hovered_handle is None and not self.is_drag_mode and not self.is_picking_mode:
             self.setCursor(Qt.ArrowCursor)
         if old_h != self.hovered_handle:
             self.update()
@@ -454,6 +972,15 @@ class GroundCalibratorWidget(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self.is_drag_mode and self.drag_start_pos:
+            self.is_drag_mode = False
+            self.drag_start_pos = None
+            self.setCursor(Qt.ArrowCursor)
+            self._recalculate()
+            self.update()
+            event.accept()
+            return
+
         if self.active_handle is not None:
             self.active_handle = None
             self.update()
@@ -554,7 +1081,7 @@ class GroundCalibratorWidget(QWidget):
         painter.setPen(QPen(QColor(255, 255, 255), 1.5))
         painter.drawEllipse(c_widget, 4.5, 4.5)
 
-        # 5. LIVE 3D MODEL PREVIEW resting on the ground quad!
+        # 5. LIVE 3D MODEL PREVIEW with auto-sizing to match ground rectangle!
         if self.mesh and self.mesh.vertices and self.renderer:
             pw = max(64, int(self.img_rect.width()))
             ph = max(64, int(self.img_rect.height()))
@@ -570,17 +1097,45 @@ class GroundCalibratorWidget(QWidget):
             cam_prev.target_x = sol.get("target_x", 0.0)
             cam_prev.target_y = sol.get("target_y", 0.0)
             cam_prev.target_z = sol.get("target_z", 0.0)
+            cam_prev.ground_y = sol.get("target_y", 0.0)
+            cam_prev.projection_mode = ProjectionMode.PERSPECTIVE
+            cam_prev.orthographic = False
+
+            # Model to render with matched sizing:
+            preview_mesh = self.mesh
+            obj_trans = None
+            ptype = getattr(self.mesh, 'primitive_type', None)
+            rw = sol.get("rect_width", 2.0)
+            rd = sol.get("rect_depth", 2.0)
+            rh = sol.get("rect_height", 2.0)
+
+            if ptype == "Box":
+                preview_mesh = create_box_primitive(rw, rh, rd)
+            elif ptype == "Pyramid":
+                preview_mesh = create_pyramid_primitive(rw, rh, rd)
+            elif ptype == "Sphere":
+                sr = sol.get("sphere_radius", 1.0)
+                preview_mesh = create_sphere_primitive(sr)
+                # Sphere rests cleanly on top of the ground rectangle
+                cam_prev.target_y = sol.get("target_y", 0.0) + sr
+            elif self.mesh:
+                # 3D imported model: scale footprint to match ground quad
+                obj_trans = ObjectTransform()
+                obj_trans.scale_x = sol.get("scale_x", 1.0)
+                obj_trans.scale_y = sol.get("scale_y", 1.0)
+                obj_trans.scale_z = sol.get("scale_z", 1.0)
 
             # Render preview image
             prev_img = self.renderer.render_to_image(
-                mesh=self.mesh,
+                mesh=preview_mesh,
                 camera=cam_prev,
                 lighting=self.lighting,
                 style=RenderStyle.SHADED_WIREFRAME,
                 width=pw,
                 height=ph,
                 bg_color=QColor(0, 0, 0, 0),
-                draw_model=True
+                draw_model=True,
+                object_transform=obj_trans
             )
             # Draw semi-transparent preview over the quad
             painter.setOpacity(0.88)
@@ -593,8 +1148,15 @@ class GroundCalibratorWidget(QWidget):
             QColor(239, 68, 68),   # 1: Front-Right (Red)
             QColor(59, 130, 246),  # 2: Back-Right (Blue)
             QColor(234, 179, 8),   # 3: Back-Left (Yellow)
+            QColor(192, 132, 252), # 4: Height Pin (Purple)
         ]
-        handle_names = ["1 FL", "2 FR", "3 BR", "4 BL"]
+        handle_names = ["1 FL", "2 FR", "3 BR", "4 BL", "5 H"]
+
+        if getattr(self, 'has_height_point', False) and len(pts) >= 5:
+            # Draw vertical guide dashed line from base FL (pts[0]) to height pin (pts[4])
+            h_pen = QPen(QColor(192, 132, 252, 220), 1.5, Qt.DashLine)
+            painter.setPen(h_pen)
+            painter.drawLine(pts[0], pts[4])
 
         for idx, (pt, col, name) in enumerate(zip(pts, handle_colors, handle_names)):
             is_hover = (self.hovered_handle == idx)
@@ -608,7 +1170,11 @@ class GroundCalibratorWidget(QWidget):
             # Pin badge label
             painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
             painter.setPen(QColor(255, 255, 255))
-            painter.drawText(int(pt.x() + r + 4), int(pt.y() + 4), name)
+            if idx == 4:
+                rh = sol.get("rect_height", 2.0)
+                painter.drawText(int(pt.x() + r + 4), int(pt.y() + 4), f"{name} ({rh:.2f})")
+            else:
+                painter.drawText(int(pt.x() + r + 4), int(pt.y() + 4), name)
 
         # 7. Sequential Picking Mode Banner & Rubber-band Guides
         if self.is_picking_mode:
@@ -617,9 +1183,16 @@ class GroundCalibratorWidget(QWidget):
             painter.drawRect(0, 0, w, 34)
             painter.setPen(QColor(250, 204, 21))
             painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
-            step_names = ['1: Front-Left (Green)', '2: Front-Right (Red)', '3: Back-Right (Blue)', '4: Back-Left (Yellow)']
-            cur_idx = min(3, len(self.picked_points))
-            msg = f"✏️ Drawing Mode — Click point {cur_idx + 1} of 4: {step_names[cur_idx]}  [Esc to cancel]"
+            target_count = getattr(self, 'pick_mode_points', 4)
+            step_names = [
+                '1: Front-Left (Green)',
+                '2: Front-Right (Red)',
+                '3: Back-Right (Blue)',
+                '4: Back-Left (Yellow)',
+                '5: Height (Purple)'
+            ]
+            cur_idx = min(target_count - 1, len(self.picked_points))
+            msg = f"📍 {target_count}-Point Mode — Click point {cur_idx + 1} of {target_count}: {step_names[cur_idx]}  [Esc to cancel]"
             painter.drawText(14, 22, msg)
 
             # Draw lines and points for already clicked corners
@@ -631,10 +1204,19 @@ class GroundCalibratorWidget(QWidget):
             if clicked_pts:
                 p_pen = QPen(QColor(56, 189, 248), 2, Qt.DashLine)
                 painter.setPen(p_pen)
-                for i in range(len(clicked_pts) - 1):
-                    painter.drawLine(clicked_pts[i], clicked_pts[i+1])
-                if self.current_cursor_pos:
-                    painter.drawLine(clicked_pts[-1], QPointF(self.current_cursor_pos))
+                if len(clicked_pts) == 4 and self.current_cursor_pos:
+                    for i in range(3):
+                        painter.drawLine(clicked_pts[i], clicked_pts[i+1])
+                    painter.drawLine(clicked_pts[3], clicked_pts[0])
+                    # Rubberband line from Front-Left to cursor for height
+                    h_pen = QPen(QColor(192, 132, 252), 2, Qt.DashLine)
+                    painter.setPen(h_pen)
+                    painter.drawLine(clicked_pts[0], QPointF(self.current_cursor_pos))
+                else:
+                    for i in range(len(clicked_pts) - 1):
+                        painter.drawLine(clicked_pts[i], clicked_pts[i+1])
+                    if self.current_cursor_pos:
+                        painter.drawLine(clicked_pts[-1], QPointF(self.current_cursor_pos))
 
                 for i, cp in enumerate(clicked_pts):
                     painter.setBrush(QBrush(handle_colors[i]))
@@ -643,6 +1225,14 @@ class GroundCalibratorWidget(QWidget):
                     painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
                     painter.setPen(QColor(255, 255, 255))
                     painter.drawText(int(cp.x() + 9), int(cp.y() + 4), handle_names[i])
+
+        elif self.is_drag_mode and not self.drag_start_pos:
+            painter.setBrush(QBrush(QColor(15, 23, 42, 230)))
+            painter.setPen(Qt.NoPen)
+            painter.drawRect(0, 0, w, 34)
+            painter.setPen(QColor(56, 189, 248))
+            painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+            painter.drawText(14, 22, "✏️ Draw Mode — Click and drag on canvas to outline ground rectangle  [Esc to cancel]")
 
         painter.end()
 
@@ -658,7 +1248,29 @@ class GroundCalibratorDialog(QDialog):
                  renderer=None, frame_rect=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("3D Ground Calibrator — Perspective Matching")
-        self.resize(880, 620)
+
+        # Window sizing & geometry restoration:
+        # Default: 90% of screen size, centered. Remembers size and position across sessions.
+        saved_geo = load_ground_dialog_geometry()
+        restored = False
+        if saved_geo:
+            try:
+                restored = self.restoreGeometry(QByteArray.fromHex(saved_geo.encode('ascii')))
+            except Exception:
+                restored = False
+
+        if not restored:
+            screen = QApplication.primaryScreen()
+            if screen:
+                geom = screen.availableGeometry()
+            else:
+                geom = QDesktopWidget().availableGeometry()
+            w = int(geom.width() * 0.90)
+            h = int(geom.height() * 0.90)
+            x = geom.x() + (geom.width() - w) // 2
+            y = geom.y() + (geom.height() - h) // 2
+            self.setGeometry(x, y, w, h)
+
         self.setStyleSheet("""
             QDialog { background: #1c1e24; color: #f1f5f9; }
             QLabel { font-family: "Segoe UI"; font-size: 11px; color: #cbd5e1; }
@@ -677,14 +1289,62 @@ class GroundCalibratorDialog(QDialog):
 
         # Header description
         hdr = QLabel(
-            "📐 <b>Ground Calibrator</b>: Drag the 4 corner pins "
-            "(<b style='color:#22c55e;'>1 FL</b> Front-Left, <b style='color:#ef4444;'>2 FR</b> Front-Right, "
-            "<b style='color:#3b82f6;'>3 BR</b> Back-Right, <b style='color:#eab308;'>4 BL</b> Back-Left) "
-            "or click <b>✏️ Draw 4 Points</b> to match an object/plane drawn on your canvas.<br>"
-            "<span style='color:#94a3b8;font-size:10px;'>The 3D model is rendered live atop the rectangle and will be placed directly onto this ground upon applying.</span>"
+            "📐 <b>Ground Calibrator</b>: Match camera perspective and fit 3D models to your canvas ground plane.<br>"
+            "<span style='color:#94a3b8;font-size:10px;'>"
+            "Drag the 4 corner pins (<b style='color:#22c55e;'>1 FL</b>, <b style='color:#ef4444;'>2 FR</b>, "
+            "<b style='color:#3b82f6;'>3 BR</b>, <b style='color:#eab308;'>4 BL</b>), drag <b style='color:#c084fc;'>5 H</b> to adjust height, "
+            "or use <b>✏️ Draw</b>, <b>📍 4-Point Draw</b>, or <b>📍 5-Point Draw</b>.</span>"
         )
         hdr.setWordWrap(True)
         layout.addWidget(hdr)
+
+        # =========================================================================
+        # TOP TOOLBAR: Draw, 4-Point Draw, 5-Point Draw, Flip 180, Center, Reset
+        # =========================================================================
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(6)
+
+        btn_draw = QPushButton("✏️ Draw Rect")
+        btn_draw.setStyleSheet("background:#1e293b; color:#38bdf8; font-weight:bold; border:1px solid #0284c7; padding:5px 12px;")
+        btn_draw.setToolTip("Click and drag across canvas to draw a ground perspective rectangle")
+        btn_draw.clicked.connect(self._on_draw_clicked)
+        top_bar.addWidget(btn_draw)
+
+        btn_pick_4 = QPushButton("📍 4-Point Draw")
+        btn_pick_4.setStyleSheet("background:#1e293b; color:#facc15; font-weight:bold; border:1px solid #ca8a04; padding:5px 12px;")
+        btn_pick_4.setToolTip("Click 4 consecutive corners on your canvas (1 Front-Left, 2 Front-Right, 3 Back-Right, 4 Back-Left)")
+        btn_pick_4.clicked.connect(lambda: self._on_pick_clicked(4))
+        top_bar.addWidget(btn_pick_4)
+
+        btn_pick_5 = QPushButton("📍 5-Point Draw")
+        btn_pick_5.setStyleSheet("background:#1e293b; color:#c084fc; font-weight:bold; border:1px solid #9333ea; padding:5px 12px;")
+        btn_pick_5.setToolTip("Click 4 corners for the base + 1 fifth point to define the vertical height in perspective!")
+        btn_pick_5.clicked.connect(lambda: self._on_pick_clicked(5))
+        top_bar.addWidget(btn_pick_5)
+
+        self.chk_keep_horizon = QCheckBox("Keep Horizon Horizontal")
+        self.chk_keep_horizon.setChecked(True)
+        self.chk_keep_horizon.setToolTip("Lock camera roll to 0° so the horizon line stays completely horizontal")
+        self.chk_keep_horizon.stateChanged.connect(self._on_keep_horizon_toggled)
+        top_bar.addWidget(self.chk_keep_horizon)
+
+        btn_flip = QPushButton("🔄 Flip 180°")
+        btn_flip.setToolTip("Flip model yaw 180° (toggle between facing front and back)")
+        btn_flip.clicked.connect(self._on_flip_clicked)
+        top_bar.addWidget(btn_flip)
+
+        btn_center = QPushButton("⌖ Center")
+        btn_center.setToolTip("Centers the ground quad in view")
+        btn_center.clicked.connect(self._on_center_clicked)
+        top_bar.addWidget(btn_center)
+
+        btn_reset = QPushButton("⟲ Reset")
+        btn_reset.setToolTip("Resets the pins to default perspective")
+        btn_reset.clicked.connect(self._on_reset_clicked)
+        top_bar.addWidget(btn_reset)
+
+        top_bar.addStretch(1)
+        layout.addLayout(top_bar)
 
         # Interactive Canvas Widget
         self.calibrator_widget = GroundCalibratorWidget(
@@ -697,64 +1357,81 @@ class GroundCalibratorDialog(QDialog):
             parent=self
         )
         self.calibrator_widget.solution_changed.connect(self._on_solution_changed)
+        self.calibrator_widget.guidance_changed.connect(self._set_guidance)
         layout.addWidget(self.calibrator_widget, 1)
+
+        # Status / Guidance guidance bar
+        self.lbl_guidance = QLabel("📐 Ready: Drag corner pins or click '✏️ Draw' / '📍 4-Point Draw' / '📍 5-Point Draw' to match ground perspective.")
+        self.lbl_guidance.setWordWrap(True)
+        self.lbl_guidance.setStyleSheet(
+            "font-family:'Segoe UI'; font-size:11px; color:#38bdf8; "
+            "background:#0f172a; padding:6px 10px; border-radius:4px; border:1px solid #1e293b;"
+        )
+        layout.addWidget(self.lbl_guidance)
 
         # Solved Parameters readout bar
         self.lbl_stats = QLabel("Solving...")
         self.lbl_stats.setStyleSheet(
             "font-family:'Consolas', monospace; font-size:11px; color:#38bdf8; "
-            "background:#12141a; padding:6px; border-radius:3px; border:1px solid #1e293b;"
+            "background:#12141a; padding:6px 10px; border-radius:4px; border:1px solid #1e293b;"
         )
         layout.addWidget(self.lbl_stats)
 
-        # Toolbar
-        bar = QHBoxLayout()
-        bar.setSpacing(6)
-
-        btn_draw = QPushButton("✏️ Draw 4 Points")
-        btn_draw.setStyleSheet("background:#1e293b; color:#38bdf8; font-weight:bold; border:1px solid #0284c7; padding:4px 10px;")
-        btn_draw.setToolTip("Click 4 consecutive corners on your canvas (1 Front-Left, 2 Front-Right, 3 Back-Right, 4 Back-Left)")
-        btn_draw.clicked.connect(self.calibrator_widget.start_pick_mode)
-        bar.addWidget(btn_draw)
-
-        self.chk_keep_horizon = QCheckBox("Keep Horizon Horizontal")
-        self.chk_keep_horizon.setChecked(True)
-        self.chk_keep_horizon.setToolTip("Lock camera roll to 0° so the horizon line stays completely horizontal")
-        self.chk_keep_horizon.stateChanged.connect(self._on_keep_horizon_toggled)
-        bar.addWidget(self.chk_keep_horizon)
-
-        btn_flip = QPushButton("🔄 Flip 180°")
-        btn_flip.setToolTip("Flip model yaw 180° (toggle between facing front and back)")
-        btn_flip.clicked.connect(self._on_flip_clicked)
-        bar.addWidget(btn_flip)
-
-        btn_center = QPushButton("⌖ Center")
-        btn_center.setToolTip("Centers the ground quad in view")
-        btn_center.clicked.connect(self.calibrator_widget.center_quad)
-        bar.addWidget(btn_center)
-
-        btn_reset = QPushButton("⟲ Reset")
-        btn_reset.setToolTip("Resets the 4 pins to default perspective")
-        btn_reset.clicked.connect(self.calibrator_widget.reset_points)
-        bar.addWidget(btn_reset)
-
-        bar.addStretch(1)
+        # Bottom Action Bar
+        bot_bar = QHBoxLayout()
+        bot_bar.setSpacing(6)
+        bot_bar.addStretch(1)
 
         btn_apply = QPushButton("✔ Place Model on Ground & Apply")
         btn_apply.setStyleSheet(
-            "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 14px; font-size:12px; font-weight:bold;"
+            "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 16px; font-size:12px; font-weight:bold;"
         )
         btn_apply.setToolTip("Applies the solved camera and places the 3D model directly on top of the ground rectangle")
         btn_apply.clicked.connect(self._apply)
-        bar.addWidget(btn_apply)
+        bot_bar.addWidget(btn_apply)
 
         btn_close = QPushButton("Cancel")
         btn_close.clicked.connect(self.reject)
-        bar.addWidget(btn_close)
+        bot_bar.addWidget(btn_close)
 
-        layout.addLayout(bar)
+        layout.addLayout(bot_bar)
 
         self._on_solution_changed(self.calibrator_widget.last_solution)
+
+    def _save_geom(self):
+        try:
+            geo_hex = self.saveGeometry().toHex().data().decode('ascii')
+            save_ground_dialog_geometry(geo_hex)
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._save_geom()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._save_geom()
+
+    def closeEvent(self, event):
+        self._save_geom()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._save_geom()
+        super().reject()
+
+    def _on_draw_clicked(self):
+        self.calibrator_widget.start_drag_mode()
+
+    def _on_pick_clicked(self, n=4):
+        self.calibrator_widget.start_pick_mode(n)
+
+    def _on_center_clicked(self):
+        self.calibrator_widget.center_quad()
+
+    def _on_reset_clicked(self):
+        self.calibrator_widget.reset_points()
 
     def _on_keep_horizon_toggled(self, state):
         self.calibrator_widget.set_keep_horizon(state == Qt.Checked)
@@ -762,16 +1439,34 @@ class GroundCalibratorDialog(QDialog):
     def _on_flip_clicked(self):
         self.calibrator_widget.toggle_flip_yaw()
 
+    def _set_guidance(self, text, level="info"):
+        level_styles = {
+            "info":    "color:#38bdf8; background:#0f172a; border:1px solid #1e293b;",
+            "warn":    "color:#facc15; background:#2d2006; border:1px solid #854d0e; font-weight:bold;",
+            "error":   "color:#f87171; background:#2a0c0c; border:1px solid #991b1b; font-weight:bold;",
+            "success": "color:#4ade80; background:#062e1b; border:1px solid #166534; font-weight:bold;"
+        }
+        style = level_styles.get(level, level_styles["info"])
+        self.lbl_guidance.setStyleSheet(
+            f"font-family:'Segoe UI'; font-size:11px; padding:6px 10px; border-radius:4px; {style}"
+        )
+        self.lbl_guidance.setText(text)
+
     def _on_solution_changed(self, sol):
         yaw = sol.get("yaw", 180.0)
         pitch = sol.get("pitch", 15.0)
         roll = sol.get("roll", 0.0)
         fov = sol.get("fov", 45.0)
         dist = sol.get("distance", 3.0)
+        rw = sol.get("rect_width", 2.0)
+        rd = sol.get("rect_depth", 2.0)
+        rh = sol.get("rect_height", 2.0)
         self.lbl_stats.setText(
-            f"Yaw: {yaw:5.1f}° | Tilt/Pitch: {pitch:5.1f}° | Roll: {roll:5.1f}° | FOV: {fov:5.1f}° | Dist: {dist:4.2f}"
+            f"Yaw: {yaw:5.1f}° | Tilt/Pitch: {pitch:5.1f}° | Roll: {roll:5.1f}° | FOV: {fov:5.1f}° | Dist: {dist:4.2f} | Ground Size: {rw:4.2f} × {rd:4.2f} | Height: {rh:4.2f}"
         )
 
     def _apply(self):
+        self._save_geom()
         self.applied.emit(self.calibrator_widget.last_solution)
         self.accept()
+

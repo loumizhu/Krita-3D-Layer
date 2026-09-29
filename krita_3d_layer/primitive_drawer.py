@@ -1564,50 +1564,24 @@ class BoxDrawerWidget(QWidget):
 
 class PrimitiveDrawerDialog(QDialog):
     """
-    Full-featured window allowing artists to draw a 3D box or primitive over their sketch,
-    inferring perspective, FOV, tilt, and rotation automatically.
-    Remembers and restores past drawn primitives with timestamps and allows controlling box transparency.
+    Unified dialog proxy: forwards to GroundCalibratorDialog so Draw Primitive
+    and Ground Calibrator share one unified, merged interface.
     """
     applied = pyqtSignal(dict)
 
-    def __init__(self, bg_image=None, camera=None, lighting=None, renderer=None, start_in_click_draw=False, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("✏️ Draw 3D Primitive & Perspective Calibrator")
-        self.setStyleSheet("background-color: #0f172a; color: #f1f5f9; font-family: 'Segoe UI', sans-serif;")
-
-        # Restore window geometry (position and size)
-        geom = load_dialog_geometry()
-        if geom:
-            try:
-                self.restoreGeometry(QByteArray.fromHex(geom.encode('ascii')))
-            except Exception:
-                self.resize(1150, 800)
-        else:
-            self.resize(1150, 800)
-
-        self.drawer_widget = BoxDrawerWidget(
+    def __new__(cls, bg_image=None, camera=None, lighting=None, renderer=None, start_in_click_draw=False, parent=None, **kwargs):
+        from .ground_calibrator import GroundCalibratorDialog
+        return GroundCalibratorDialog(
             bg_image=bg_image,
+            mesh=kwargs.get("mesh"),
             camera=camera,
             lighting=lighting,
             renderer=renderer,
-            parent=self
+            frame_rect=kwargs.get("frame_rect"),
+            start_in_click_draw=start_in_click_draw,
+            initial_mode=kwargs.get("initial_mode"),
+            parent=parent
         )
-        self.drawer_widget.solution_changed.connect(self._on_solution_changed)
-        self.drawer_widget.click_draw_finished.connect(self._on_click_draw_finished)
-
-        self.history_items = load_primitive_history()
-
-        self._build_ui()
-
-        # Restore last drawn primitive if history exists
-        if self.history_items:
-            self.drawer_widget.restore_from_entry(self.history_items[0])
-            self._sync_ui_from_drawer()
-        else:
-            self._update_hud(self.drawer_widget.last_solution)
-
-        if start_in_click_draw:
-            self._start_click_draw()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)

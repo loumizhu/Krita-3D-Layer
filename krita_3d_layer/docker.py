@@ -2945,47 +2945,32 @@ class Krita3DLayerDocker(DockWidget):
         # 1. Reset object transform so model sits cleanly centered and resting on the ground quad
         self._reset_obj_all()
 
-        # 2. Auto-size Primitive or Scale 3D Object to match Ground Rectangle
+        # 2. Set generated 3D primitive mesh or scale existing 3D Object
         ptype = sol.get("primitive_type") or (getattr(self.mesh, 'primitive_type', None) if self.mesh else None)
         rw = float(sol.get("rect_width", 2.0))
         rd = float(sol.get("rect_depth", 2.0))
         rh = float(sol.get("rect_height", 2.0))
         sr = float(sol.get("sphere_radius", 1.0))
 
-        if ptype == "Box":
-            if hasattr(self, 'spin_prim_box_w'):
-                self.spin_prim_box_w.blockSignals(True)
-                self.spin_prim_box_w.setValue(rw)
-                self.spin_prim_box_w.blockSignals(False)
-            if hasattr(self, 'spin_prim_box_d'):
-                self.spin_prim_box_d.blockSignals(True)
-                self.spin_prim_box_d.setValue(rd)
-                self.spin_prim_box_d.blockSignals(False)
-            if hasattr(self, 'spin_prim_box_h'):
-                self.spin_prim_box_h.blockSignals(True)
-                self.spin_prim_box_h.setValue(rh)
-                self.spin_prim_box_h.blockSignals(False)
-            self._create_primitive("Box")
-        elif ptype == "Pyramid":
-            if hasattr(self, 'spin_prim_pyr_w'):
-                self.spin_prim_pyr_w.blockSignals(True)
-                self.spin_prim_pyr_w.setValue(rw)
-                self.spin_prim_pyr_w.blockSignals(False)
-            if hasattr(self, 'spin_prim_pyr_d'):
-                self.spin_prim_pyr_d.blockSignals(True)
-                self.spin_prim_pyr_d.setValue(rd)
-                self.spin_prim_pyr_d.blockSignals(False)
-            if hasattr(self, 'spin_prim_pyr_h'):
-                self.spin_prim_pyr_h.blockSignals(True)
-                self.spin_prim_pyr_h.setValue(rh)
-                self.spin_prim_pyr_h.blockSignals(False)
-            self._create_primitive("Pyramid")
-        elif ptype == "Sphere":
-            if hasattr(self, 'spin_prim_sph_r'):
-                self.spin_prim_sph_r.blockSignals(True)
-                self.spin_prim_sph_r.setValue(sr)
-                self.spin_prim_sph_r.blockSignals(False)
-            self._create_primitive("Sphere")
+        if "mesh" in sol and sol["mesh"]:
+            self.mesh = sol["mesh"]
+            self.mesh_path = None
+            self.mesh.primitive_type = ptype
+            if ptype == "Box":
+                self.mesh.primitive_params = {"w": rw, "h": rh, "d": rd}
+            elif ptype == "Cylinder":
+                self.mesh.primitive_params = {"radius": rw * 0.5, "height": rh, "segments": 24}
+            elif ptype == "Sphere":
+                self.mesh.primitive_params = {"radius": sr, "rings": 16, "sectors": 24}
+            elif ptype == "Pyramid":
+                self.mesh.primitive_params = {"w": rw, "h": rh, "d": rd}
+            elif ptype == "Cone":
+                self.mesh.primitive_params = {"radius": rw * 0.5, "height": rh, "segments": 24}
+            elif ptype == "Plane":
+                self.mesh.primitive_params = {"w": rw, "d": rd, "subdivisions": 2}
+            self.viewport.set_mesh(self.mesh)
+            self._sync_primitive_ui()
+            self.lbl_model.setText(f"3D Primitive: {ptype} ({self.mesh.vertex_count} vertices, {self.mesh.face_count} faces)")
         elif self.mesh and ("scale_x" in sol):
             sx = float(sol.get("scale_x", 1.0))
             sy = float(sol.get("scale_y", 1.0))
@@ -3025,23 +3010,26 @@ class Krita3DLayerDocker(DockWidget):
         self._sync_target_spins()
         self.viewport.update()
         self._stamp()
-        self.lbl_status.setText(f"Ground calibrated: Tilt {c.pitch:.1f}° Yaw {c.yaw:.1f}° Roll {c.roll:.1f}° (Placed on ground)")
+        self.lbl_status.setText(f"Perspective calibrated: Tilt {c.pitch:.1f}° Yaw {c.yaw:.1f}° Roll {c.roll:.1f}° (Placed on ground)")
         self._save_session()
 
     # -----------------------------------------------------------------
-    # Primitive Drawer Dialog
+    # Unified Primitive Drawer / Ground Calibrator Dialog
     # -----------------------------------------------------------------
     def _open_primitive_drawer(self, start_click_draw=False):
         snapshot = CanvasSyncManager.get_canvas_snapshot()
-        dlg = PrimitiveDrawerDialog(
+        active_frame = self.frame_rect if (self.chk_use_frame.isChecked() and self.frame_rect) else None
+        dlg = GroundCalibratorDialog(
             bg_image=snapshot,
+            mesh=self.mesh,
             camera=self.viewport.camera,
             lighting=self.viewport.lighting,
             renderer=self.viewport.renderer,
+            frame_rect=active_frame,
             start_in_click_draw=start_click_draw,
             parent=self
         )
-        dlg.applied.connect(self._on_primitive_drawer_applied)
+        dlg.applied.connect(self._on_ground_calibrator_applied)
         dlg.exec_()
 
     def _on_primitive_drawer_applied(self, sol):

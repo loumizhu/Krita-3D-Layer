@@ -5,9 +5,11 @@ Ground plane calibrator. Matches camera angles and FOV to a 4-point rectangle on
 import os
 import json
 import math
+import datetime
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QSizePolicy, QFrame, QCheckBox, QApplication, QDesktopWidget
+    QLabel, QSizePolicy, QFrame, QCheckBox, QApplication, QDesktopWidget,
+    QComboBox, QMenu, QAction
 )
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QPolygonF, QImage, QCursor,
@@ -19,7 +21,11 @@ from .renderer import (
     Camera3D, Lighting3D, Renderer3D, RenderStyle, project_camera_point,
     ProjectionMode, ObjectTransform
 )
-from .primitive_drawer import create_box_primitive, create_pyramid_primitive, create_sphere_primitive
+from .primitive_drawer import (
+    create_box_primitive, create_cylinder_primitive, create_sphere_primitive,
+    create_pyramid_primitive, create_cone_primitive, create_plane_primitive,
+    add_primitive_to_history, load_primitive_history, clear_primitive_history
+)
 
 
 def get_ground_dialog_geometry_file_path():
@@ -601,7 +607,7 @@ class GroundCalibratorWidget(QWidget):
         self.hovered_handle = None
         self.is_picking_mode = False
         self.pick_mode_points = 4
-        self.has_height_point = False
+        self.has_height_point = True
         self.height_norm_pt = None
         self.is_drag_mode = False
         self.drag_start_pos = None
@@ -609,6 +615,29 @@ class GroundCalibratorWidget(QWidget):
         self.keep_horizon = True
         self.flip_yaw = False
         self.current_cursor_pos = None
+
+        # Primitive selection & aspect preset
+        self.primitive_type = "Box"
+        if self.mesh and hasattr(self.mesh, 'primitive_type') and self.mesh.primitive_type:
+            self.primitive_type = self.mesh.primitive_type
+        elif self.mesh and getattr(self.mesh, 'vertices', None):
+            self.primitive_type = "Loaded 3D Model"
+        self.aspect_preset = "Free"
+
+        # Horizon interaction
+        self.is_dragging_horizon = False
+        self.hover_horizon = False
+        self.drag_start_pitch = 15.0
+
+        # Transform Gizmo & Quad dragging (Move, Rotate, Scale)
+        self.active_gizmo_action = None  # None, 'move', 'rotate', 'scale'
+        self.hover_gizmo_part = None     # None, 'move', 'rotate', 'scale', 'inside_quad'
+        self.drag_start_mouse_pos = None
+        self.drag_start_quad_pts = []
+        self.drag_start_height_pt = None
+        self.drag_start_center_norm = None
+        self.drag_start_dist = 1.0
+        self.drag_start_angle = 0.0
 
         # Current image rect within widget (for letterbox/aspect mapping)
         self.img_rect = QRectF(0, 0, 480, 360)
@@ -619,6 +648,135 @@ class GroundCalibratorWidget(QWidget):
 
         self.last_solution = {}
         self._recalculate()
+
+    def set_primitive_type(self, ptype):
+        """Sets active 3D primitive type or loaded model."""
+        self.primitive_type = ptype
+        if ptype in ("Box", "Cylinder", "Pyramid", "Cone"):
+            self.has_height_point = True
+            corners_3d = self.last_solution.get("corners_3d")
+            base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
+            rh = self.last_solution.get("rect_height", 2.0)
+            doc_w, doc_h = self._get_doc_size()
+            self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
+        elif ptype in ("Sphere", "Plane", "Loaded 3D Model"):
+            self.has_height_point = False
+            self.height_norm_pt = None
+        self._recalculate()
+        self.update()
+
+    def set_aspect_preset(self, preset_name):
+        """Sets aspect ratio proportions for the ground rectangle & height."""
+        self.aspect_preset = preset_name
+        if preset_name == "Free":
+            self.update()
+            return
+        rw = self.last_solution.get("rect_width", 2.0)
+        rd = self.last_solution.get("rect_depth", 2.0)
+        base_size = max(0.5, (rw + rd) * 0.5)
+
+        if preset_name == "1:1:1 Cube":
+            rh = base_size
+        elif preset_name == "1:2:1 Standing Block":
+            rh = base_size * 2.0
+        elif preset_name == "1:3:1 Human / Character":
+            rh = base_size * 3.0
+        elif preset_name == "2:1:3 Room / Interior":
+            rh = base_size * 0.5
+        elif preset_name == "4:1:4 Wide Stage":
+            rh = base_size * 0.25
+        else:
+            rh = base_size
+
+        self.last_solution["rect_height"] = rh
+        corners_3d = self.last_solution.get("corners_3d")
+        base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
+        doc_w, doc_h = self._get_doc_size()
+        self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
+        self.has_height_point = True
+        self._recalculate()
+        self.update()
+
+    def _get_horizon_endpoints(self):
+        """Returns (p1, p2) representing the visible horizon line across the widget."""
+        sol = self.last_solution
+        vp1_doc = sol.get("vp1")
+        vp2_doc = sol.get("vp2")
+        w = float(self.width())
+        h = float(self.height())
+        if vp1_doc and vp2_doc:
+            vp1_w = self._doc_to_widget(vp1_doc)
+            vp2_w = self._doc_to_widget(vp2_doc)
+            dx = vp2_w.x() - vp1_w.x()
+            dy = vp2_w.y() - vp1_w.y()
+            if abs(dx) > 1e-4 or abs(dy) > 1e-4:
+                length = math.hypot(dx, dy)
+                scale = max(w, h) * 4.0 / max(1.0, length)
+                h_p1 = QPointF(vp1_w.x() - dx * scale, vp1_w.y() - dy * scale)
+                h_p2 = QPointF(vp2_w.x() + dx * scale, vp2_w.y() + dy * scale)
+                return h_p1, h_p2
+        # Fallback horizontal line across image rect at solved eye-level
+        doc_w, doc_h = self._get_doc_size()
+        cy = doc_h * 0.5
+        cur_fov = self.camera.fov if self.camera else 45.0
+        pitch = sol.get("pitch", 15.0)
+        f = (min(doc_w, doc_h) * 0.5) / math.tan(math.radians(max(5.0, min(160.0, cur_fov)) * 0.5))
+        y_doc = cy - f * math.tan(math.radians(pitch))
+        yw = self._doc_to_widget(QPointF(0, y_doc)).y()
+        return QPointF(0, yw), QPointF(w, yw)
+
+    def _distance_to_horizon(self, pt):
+        """Calculates perpendicular pixel distance from point to the horizon line."""
+        p1, p2 = self._get_horizon_endpoints()
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        denom = math.hypot(dx, dy)
+        if denom < 1e-4:
+            return 9999.0
+        numer = abs(dy * pt.x() - dx * pt.y() + p2.x() * p1.y() - p2.y() * p1.x())
+        return numer / denom
+
+    def _get_gizmo_parts(self):
+        """
+        Returns geometry of the on-screen transform gizmo at the quad center:
+        (c_w, move_rect, rot_pt, scale_pt)
+        """
+        sol = self.last_solution
+        c_doc = sol.get("center_2d")
+        if not c_doc:
+            doc_pts = self._get_doc_points()
+            c_doc = QPointF(sum(p.x() for p in doc_pts) * 0.25, sum(p.y() for p in doc_pts) * 0.25)
+        c_w = self._doc_to_widget(c_doc)
+
+        move_rect = QRectF(c_w.x() - 13, c_w.y() - 13, 26, 26)
+        rot_pt = QPointF(c_w.x(), c_w.y() - 38)
+        scale_pt = QPointF(c_w.x() + 38, c_w.y())
+        return c_w, move_rect, rot_pt, scale_pt
+
+    def _start_gizmo_action(self, action, mouse_pos, c_w):
+        """Initiates an interactive Move, Rotate, or Scale transformation."""
+        self.active_gizmo_action = action
+        self.drag_start_mouse_pos = QPointF(mouse_pos)
+        self.drag_start_quad_pts = [QPointF(p) for p in self.norm_points]
+        self.drag_start_height_pt = QPointF(self.height_norm_pt) if self.height_norm_pt else None
+
+        pts = self.norm_points
+        self.drag_start_center_norm = QPointF(
+            sum(p.x() for p in pts) * 0.25,
+            sum(p.y() for p in pts) * 0.25
+        )
+        self.drag_start_dist = max(10.0, math.hypot(mouse_pos.x() - c_w.x(), mouse_pos.y() - c_w.y()))
+        self.drag_start_angle = math.atan2(mouse_pos.y() - c_w.y(), mouse_pos.x() - c_w.x())
+
+        if action == 'move':
+            self.guidance_changed.emit("✥ Moving Ground Rectangle: Drag to reposition on canvas.", "info")
+            self.setCursor(Qt.SizeAllCursor)
+        elif action == 'scale':
+            self.guidance_changed.emit("⤢ Scaling Ground Rectangle: Drag outward to enlarge, inward to shrink.", "info")
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif action == 'rotate':
+            self.guidance_changed.emit("⟳ Rotating Ground Rectangle: Drag around center to rotate yaw/orientation.", "info")
+            self.setCursor(Qt.PointingHandCursor)
 
     def _compute_initial_norm_points(self):
         doc_w, doc_h = self._get_doc_size()
@@ -866,11 +1024,11 @@ class GroundCalibratorWidget(QWidget):
                 n = len(self.picked_points)
                 target_count = getattr(self, 'pick_mode_points', 4)
                 if n == 1:
-                    self.guidance_changed.emit(f"👉 [Step 2 of {target_count}] Click the FRONT-RIGHT (2 FR) corner (to the right of Front-Left).", "info")
+                    self.guidance_changed.emit(f"👉 [Step 2 of {target_count}] Click FRONT-RIGHT (2 FR) corner (to the right of Front-Left).", "info")
                 elif n == 2:
-                    self.guidance_changed.emit(f"👉 [Step 3 of {target_count}] Click the BACK-RIGHT (3 BR) corner (receding towards horizon).", "info")
+                    self.guidance_changed.emit(f"👉 [Step 3 of {target_count}] Click BACK-RIGHT (3 BR) corner (receding towards horizon).", "info")
                 elif n == 3:
-                    self.guidance_changed.emit(f"👉 [Step 4 of {target_count}] Click the BACK-LEFT (4 BL) corner (receding towards horizon, left of Back-Right).", "info")
+                    self.guidance_changed.emit(f"👉 [Step 4 of {target_count}] Click BACK-LEFT (4 BL) corner (receding towards horizon, left of Back-Right).", "info")
                 elif n == 4:
                     if target_count == 4:
                         self.norm_points = list(self.picked_points[:4])
@@ -900,7 +1058,7 @@ class GroundCalibratorWidget(QWidget):
                 event.accept()
                 return
 
-            # 3. Check handle hits
+            # 3. Check Corner Pin handles (1..4 + 5 H)
             pts = self._get_widget_points()
             for idx, pt in enumerate(pts):
                 dist = (pt - QPointF(pos)).manhattanLength()
@@ -909,17 +1067,63 @@ class GroundCalibratorWidget(QWidget):
                     event.accept()
                     return
 
+            # 4. Check On-Screen Transform Gizmo handles (Rotate ⟳, Scale ⤢, Move ✥)
+            c_w, move_rect, rot_pt, scale_pt = self._get_gizmo_parts()
+
+            # Rotate handle (⟳)
+            if (rot_pt - QPointF(pos)).manhattanLength() <= 14:
+                self._start_gizmo_action('rotate', pos, c_w)
+                event.accept()
+                return
+
+            # Scale handle (⤢)
+            if (scale_pt - QPointF(pos)).manhattanLength() <= 14:
+                self._start_gizmo_action('scale', pos, c_w)
+                event.accept()
+                return
+
+            # Center Move handle (✥)
+            if (c_w - QPointF(pos)).manhattanLength() <= 15:
+                self._start_gizmo_action('move', pos, c_w)
+                event.accept()
+                return
+
+            # 5. Check Quad interior with modifier keys (Shift: Scale, Ctrl/Alt: Rotate, Normal: Move)
+            p0, p1, p2, p3 = pts[:4]
+            quad_poly = QPolygonF([p0, p1, p2, p3])
+            if quad_poly.containsPoint(pos, Qt.OddEvenFill):
+                mods = event.modifiers()
+                if mods & Qt.ShiftModifier:
+                    self._start_gizmo_action('scale', pos, c_w)
+                elif mods & (Qt.ControlModifier | Qt.AltModifier):
+                    self._start_gizmo_action('rotate', pos, c_w)
+                else:
+                    self._start_gizmo_action('move', pos, c_w)
+                event.accept()
+                return
+
+            # 6. Check Horizon Line grab
+            if self._distance_to_horizon(pos) <= 8.0:
+                self.is_dragging_horizon = True
+                self.drag_start_mouse_pos = QPointF(pos)
+                self.drag_start_pitch = self.last_solution.get("pitch", 15.0)
+                self.guidance_changed.emit("↔ Horizon Line Grabbed: Drag up or down to adjust camera eye-level tilt (pitch).", "info")
+                event.accept()
+                return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         pos = event.pos()
         self.current_cursor_pos = pos
 
+        # Picking mode
         if self.is_picking_mode:
             self.update()
             event.accept()
             return
 
+        # Drag mode
         if self.is_drag_mode and self.drag_start_pos:
             p0 = self._widget_to_doc_norm(self.drag_start_pos)
             p1 = self._widget_to_doc_norm(pos)
@@ -938,6 +1142,123 @@ class GroundCalibratorWidget(QWidget):
             event.accept()
             return
 
+        # Horizon Line Dragging: smoothly moves horizon line up/down and shifts camera pitch
+        if self.is_dragging_horizon and self.drag_start_mouse_pos:
+            dy_widget = pos.y() - self.drag_start_mouse_pos.y()
+            doc_w, doc_h = self._get_doc_size()
+            scale_y = doc_h / max(1.0, self.img_rect.height())
+            dy_doc = dy_widget * scale_y
+
+            cur_fov = self.last_solution.get("fov", 45.0)
+            half_size = min(doc_w, doc_h) * 0.5
+            f = half_size / math.tan(math.radians(max(5.0, min(160.0, cur_fov)) * 0.5))
+            cy = doc_h * 0.5
+
+            y_start = cy - f * math.tan(math.radians(self.drag_start_pitch))
+            y_new = y_start + dy_doc
+
+            ratio = (cy - y_new) / f
+            new_pitch = math.degrees(math.atan(ratio))
+            new_pitch = max(-85.0, min(85.0, new_pitch))
+
+            corners_3d = self.last_solution.get("corners_3d")
+            if corners_3d and len(corners_3d) == 4 and self.camera:
+                cam_temp = Camera3D()
+                cam_temp.yaw = self.last_solution.get("yaw", 180.0)
+                cam_temp.pitch = new_pitch
+                cam_temp.roll = self.last_solution.get("roll", 0.0)
+                cam_temp.fov = cur_fov
+                cam_temp.distance = self.last_solution.get("distance", 3.0)
+                cam_temp.pan_x = self.last_solution.get("pan_x", 0.0)
+                cam_temp.pan_y = self.last_solution.get("pan_y", 0.0)
+                cam_temp.target_x = self.last_solution.get("target_x", 0.0)
+                cam_temp.target_y = self.last_solution.get("target_y", 0.0)
+                cam_temp.target_z = self.last_solution.get("target_z", 0.0)
+
+                render_size = min(doc_w, doc_h)
+                offset_x = (doc_w - render_size) * 0.5
+                offset_y = (doc_h - render_size) * 0.5
+                _, view_mat, _ = cam_temp.get_matrices(render_size, render_size)
+
+                new_pts = []
+                for c in corners_3d:
+                    pt, _ = project_camera_point(cam_temp, view_mat, c.x(), c.y(), c.z(),
+                                                 render_size, offset_x, offset_y)
+                    if pt:
+                        new_pts.append(QPointF(max(0.001, min(0.999, pt.x() / doc_w)),
+                                               max(0.001, min(0.999, pt.y() / doc_h))))
+                if len(new_pts) == 4:
+                    self.norm_points = new_pts
+
+            self._recalculate()
+            self.update()
+            event.accept()
+            return
+
+        # Gizmo Action Dragging (Move, Rotate, Scale)
+        if self.active_gizmo_action is not None and self.drag_start_mouse_pos:
+            c_w, _, _, _ = self._get_gizmo_parts()
+            c_norm = self.drag_start_center_norm
+
+            if self.active_gizmo_action == 'move':
+                p_curr_norm = self._widget_to_doc_norm(pos)
+                p_start_norm = self._widget_to_doc_norm(self.drag_start_mouse_pos)
+                dx = p_curr_norm.x() - p_start_norm.x()
+                dy = p_curr_norm.y() - p_start_norm.y()
+                self.norm_points = [
+                    QPointF(max(0.001, min(0.999, p.x() + dx)), max(0.001, min(0.999, p.y() + dy)))
+                    for p in self.drag_start_quad_pts
+                ]
+                if self.drag_start_height_pt:
+                    self.height_norm_pt = QPointF(
+                        max(0.001, min(0.999, self.drag_start_height_pt.x() + dx)),
+                        max(0.001, min(0.999, self.drag_start_height_pt.y() + dy))
+                    )
+
+            elif self.active_gizmo_action == 'scale':
+                dist_curr = math.hypot(pos.x() - c_w.x(), pos.y() - c_w.y())
+                s = max(0.1, min(10.0, dist_curr / max(10.0, self.drag_start_dist)))
+                self.norm_points = [
+                    QPointF(
+                        max(0.001, min(0.999, c_norm.x() + (p.x() - c_norm.x()) * s)),
+                        max(0.001, min(0.999, c_norm.y() + (p.y() - c_norm.y()) * s))
+                    )
+                    for p in self.drag_start_quad_pts
+                ]
+                if self.drag_start_height_pt:
+                    self.height_norm_pt = QPointF(
+                        max(0.001, min(0.999, c_norm.x() + (self.drag_start_height_pt.x() - c_norm.x()) * s)),
+                        max(0.001, min(0.999, c_norm.y() + (self.drag_start_height_pt.y() - c_norm.y()) * s))
+                    )
+
+            elif self.active_gizmo_action == 'rotate':
+                ang_curr = math.atan2(pos.y() - c_w.y(), pos.x() - c_w.x())
+                ang_delta = ang_curr - self.drag_start_angle
+                cos_a = math.cos(ang_delta)
+                sin_a = math.sin(ang_delta)
+
+                new_pts = []
+                for p in self.drag_start_quad_pts:
+                    ox = p.x() - c_norm.x()
+                    oy = p.y() - c_norm.y()
+                    rx = c_norm.x() + ox * cos_a - oy * sin_a
+                    ry = c_norm.y() + ox * sin_a + oy * cos_a
+                    new_pts.append(QPointF(max(0.001, min(0.999, rx)), max(0.001, min(0.999, ry))))
+                self.norm_points = new_pts
+
+                if self.drag_start_height_pt:
+                    ox = self.drag_start_height_pt.x() - c_norm.x()
+                    oy = self.drag_start_height_pt.y() - c_norm.y()
+                    rx = c_norm.x() + ox * cos_a - oy * sin_a
+                    ry = c_norm.y() + ox * sin_a + oy * cos_a
+                    self.height_norm_pt = QPointF(max(0.001, min(0.999, rx)), max(0.001, min(0.999, ry)))
+
+            self._recalculate()
+            self.update()
+            event.accept()
+            return
+
+        # Active Corner Pin Handle Dragging
         if self.active_handle is not None:
             norm_pt = self._widget_to_doc_norm(pos)
             if self.active_handle < 4:
@@ -955,6 +1276,7 @@ class GroundCalibratorWidget(QWidget):
             event.accept()
             return
 
+        # Passive Hover State Detection
         pts = self._get_widget_points()
         old_h = self.hovered_handle
         self.hovered_handle = None
@@ -962,13 +1284,56 @@ class GroundCalibratorWidget(QWidget):
             dist = (pt - QPointF(pos)).manhattanLength()
             if dist <= self.HANDLE_RADIUS + 6:
                 self.hovered_handle = idx
+                self.hover_gizmo_part = None
+                self.hover_horizon = False
                 self.setCursor(Qt.PointingHandCursor)
                 break
-        if self.hovered_handle is None and not self.is_drag_mode and not self.is_picking_mode:
-            self.setCursor(Qt.ArrowCursor)
-        if old_h != self.hovered_handle:
-            self.update()
 
+        if self.hovered_handle is None:
+            c_w, move_rect, rot_pt, scale_pt = self._get_gizmo_parts()
+            if (rot_pt - QPointF(pos)).manhattanLength() <= 14:
+                self.hover_gizmo_part = 'rotate'
+                self.hover_horizon = False
+                self.setCursor(Qt.PointingHandCursor)
+                self.guidance_changed.emit("⟳ Gizmo Rotate: Drag around center to rotate ground rectangle.", "info")
+            elif (scale_pt - QPointF(pos)).manhattanLength() <= 14:
+                self.hover_gizmo_part = 'scale'
+                self.hover_horizon = False
+                self.setCursor(Qt.SizeFDiagCursor)
+                self.guidance_changed.emit("⤢ Gizmo Scale: Drag outward/inward to scale ground rectangle.", "info")
+            elif (c_w - QPointF(pos)).manhattanLength() <= 15:
+                self.hover_gizmo_part = 'move'
+                self.hover_horizon = False
+                self.setCursor(Qt.SizeAllCursor)
+                self.guidance_changed.emit("✥ Gizmo Move: Drag to translate ground rectangle on canvas.", "info")
+            else:
+                p0, p1, p2, p3 = pts[:4]
+                quad_poly = QPolygonF([p0, p1, p2, p3])
+                if quad_poly.containsPoint(pos, Qt.OddEvenFill):
+                    self.hover_gizmo_part = 'inside_quad'
+                    self.hover_horizon = False
+                    mods = event.modifiers()
+                    if mods & Qt.ShiftModifier:
+                        self.setCursor(Qt.SizeFDiagCursor)
+                        self.guidance_changed.emit("⤢ Shift+Drag inside quad: Scale ground rectangle.", "info")
+                    elif mods & (Qt.ControlModifier | Qt.AltModifier):
+                        self.setCursor(Qt.PointingHandCursor)
+                        self.guidance_changed.emit("⟳ Ctrl+Drag inside quad: Rotate ground rectangle.", "info")
+                    else:
+                        self.setCursor(Qt.SizeAllCursor)
+                        self.guidance_changed.emit("✥ Drag inside quad: Move  |  Shift+Drag: Scale  |  Ctrl+Drag: Rotate", "info")
+                elif self._distance_to_horizon(pos) <= 8.0:
+                    self.hover_horizon = True
+                    self.hover_gizmo_part = None
+                    self.setCursor(Qt.SizeVerCursor)
+                    self.guidance_changed.emit("↕ Horizon Line: Drag up or down to tilt camera eye-level.", "info")
+                else:
+                    self.hover_horizon = False
+                    self.hover_gizmo_part = None
+                    if not self.is_drag_mode and not self.is_picking_mode:
+                        self.setCursor(Qt.ArrowCursor)
+
+        self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -986,6 +1351,21 @@ class GroundCalibratorWidget(QWidget):
             self.update()
             event.accept()
             return
+
+        if self.active_gizmo_action is not None:
+            self.active_gizmo_action = None
+            self.drag_start_mouse_pos = None
+            self.update()
+            event.accept()
+            return
+
+        if self.is_dragging_horizon:
+            self.is_dragging_horizon = False
+            self.drag_start_mouse_pos = None
+            self.update()
+            event.accept()
+            return
+
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
@@ -1014,30 +1394,24 @@ class GroundCalibratorWidget(QWidget):
                 painter.drawLine(0, y, w, y)
 
         pts = self._get_widget_points()
-        p0, p1, p2, p3 = pts
+        p0, p1, p2, p3 = pts[:4]
 
         sol = self.last_solution
 
-        # 2. Horizon Line
-        vp1_doc = sol.get("vp1")
-        vp2_doc = sol.get("vp2")
-        if vp1_doc and vp2_doc:
-            vp1_w = self._doc_to_widget(vp1_doc)
-            vp2_w = self._doc_to_widget(vp2_doc)
-            dx = vp2_w.x() - vp1_w.x()
-            dy = vp2_w.y() - vp1_w.y()
-            if abs(dx) > 1e-3 or abs(dy) > 1e-3:
-                scale = max(w, h) * 4.0
-                h_p1 = QPointF(vp1_w.x() - dx * scale, vp1_w.y() - dy * scale)
-                h_p2 = QPointF(vp2_w.x() + dx * scale, vp2_w.y() + dy * scale)
-                painter.setPen(QPen(QColor(234, 179, 8, 190), 1.5, Qt.DashLine))
-                painter.drawLine(h_p1, h_p2)
+        # 2. Horizon Line (Grabbable with hover & dragging glow)
+        h_p1, h_p2 = self._get_horizon_endpoints()
+        is_h_active = self.hover_horizon or self.is_dragging_horizon
+        if is_h_active:
+            painter.setPen(QPen(QColor(250, 204, 21, 255), 2.5, Qt.SolidLine))
+        else:
+            painter.setPen(QPen(QColor(234, 179, 8, 190), 1.5, Qt.DashLine))
+        painter.drawLine(h_p1, h_p2)
 
-                # Horizon Label
-                painter.setPen(QColor(250, 204, 21))
-                painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
-                mid_y = int(max(16, min(h - 12, (vp1_w.y() + vp2_w.y()) * 0.5)))
-                painter.drawText(int(self.img_rect.x() + 8), mid_y, "── Horizon Line (Eye Level) ──")
+        # Horizon Label
+        painter.setPen(QColor(250, 204, 21))
+        painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        mid_y = int(max(16, min(h - 12, (h_p1.y() + h_p2.y()) * 0.5)))
+        painter.drawText(int(self.img_rect.x() + 8), mid_y, "── Horizon Line (Eye Level) ──  [Drag Up/Down to Adjust Tilt]")
 
         # 3. Ground Perspective Floor Subdivision Grid
         grid_subdiv = 4
@@ -1053,7 +1427,7 @@ class GroundCalibratorWidget(QWidget):
             pd = QPointF(p3.x() + (p2.x() - p3.x()) * t, p3.y() + (p2.y() - p3.y()) * t)
             painter.drawLine(pc, pd)
 
-        # 4. Quad Fill and Outline
+        # 4. Quad Fill and Perspective Edges
         quad_poly = QPolygonF([p0, p1, p2, p3])
         painter.setBrush(QBrush(QColor(59, 130, 246, 35)))
         painter.setPen(Qt.NoPen)
@@ -1074,15 +1448,8 @@ class GroundCalibratorWidget(QWidget):
         painter.drawLine(p0, p2)
         painter.drawLine(p1, p3)
 
-        # Center target pin
-        c_doc = sol.get("center_2d", QPointF(0, 0))
-        c_widget = self._doc_to_widget(c_doc)
-        painter.setBrush(QBrush(QColor(34, 197, 94)))
-        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
-        painter.drawEllipse(c_widget, 4.5, 4.5)
-
-        # 5. LIVE 3D MODEL PREVIEW with auto-sizing to match ground rectangle!
-        if self.mesh and self.mesh.vertices and self.renderer:
+        # 5. LIVE 3D PREVIEW (Renders selected Primitive or Loaded 3D Model sitting on Ground)
+        if self.renderer:
             pw = max(64, int(self.img_rect.width()))
             ph = max(64, int(self.img_rect.height()))
 
@@ -1101,48 +1468,105 @@ class GroundCalibratorWidget(QWidget):
             cam_prev.projection_mode = ProjectionMode.PERSPECTIVE
             cam_prev.orthographic = False
 
-            # Model to render with matched sizing:
-            preview_mesh = self.mesh
+            ptype = getattr(self, 'primitive_type', 'Box')
+            rw = max(0.1, float(sol.get("rect_width", 2.0)))
+            rd = max(0.1, float(sol.get("rect_depth", 2.0)))
+            rh = max(0.1, float(sol.get("rect_height", 2.0)))
+
+            preview_mesh = None
             obj_trans = None
-            ptype = getattr(self.mesh, 'primitive_type', None)
-            rw = sol.get("rect_width", 2.0)
-            rd = sol.get("rect_depth", 2.0)
-            rh = sol.get("rect_height", 2.0)
 
             if ptype == "Box":
                 preview_mesh = create_box_primitive(rw, rh, rd)
+            elif ptype == "Cylinder":
+                preview_mesh = create_cylinder_primitive(radius=min(rw, rd) * 0.5, height=rh, segments=24)
+            elif ptype == "Sphere":
+                sr = min(rw, rd) * 0.5
+                preview_mesh = create_sphere_primitive(radius=sr, rings=16, sectors=24)
+                cam_prev.target_y = sol.get("target_y", 0.0) + sr
             elif ptype == "Pyramid":
                 preview_mesh = create_pyramid_primitive(rw, rh, rd)
-            elif ptype == "Sphere":
-                sr = sol.get("sphere_radius", 1.0)
-                preview_mesh = create_sphere_primitive(sr)
-                # Sphere rests cleanly on top of the ground rectangle
-                cam_prev.target_y = sol.get("target_y", 0.0) + sr
-            elif self.mesh:
-                # 3D imported model: scale footprint to match ground quad
+            elif ptype == "Cone":
+                preview_mesh = create_cone_primitive(radius=min(rw, rd) * 0.5, height=rh, segments=24)
+            elif ptype == "Plane":
+                preview_mesh = create_plane_primitive(rw, rd, 2)
+            elif ptype == "Loaded 3D Model" and self.mesh and getattr(self.mesh, 'vertices', None):
+                preview_mesh = self.mesh
                 obj_trans = ObjectTransform()
                 obj_trans.scale_x = sol.get("scale_x", 1.0)
                 obj_trans.scale_y = sol.get("scale_y", 1.0)
                 obj_trans.scale_z = sol.get("scale_z", 1.0)
+            elif self.mesh and getattr(self.mesh, 'vertices', None):
+                preview_mesh = self.mesh
+                obj_trans = ObjectTransform()
+                obj_trans.scale_x = sol.get("scale_x", 1.0)
+                obj_trans.scale_y = sol.get("scale_y", 1.0)
+                obj_trans.scale_z = sol.get("scale_z", 1.0)
+            else:
+                preview_mesh = create_box_primitive(rw, rh, rd)
 
-            # Render preview image
-            prev_img = self.renderer.render_to_image(
-                mesh=preview_mesh,
-                camera=cam_prev,
-                lighting=self.lighting,
-                style=RenderStyle.SHADED_WIREFRAME,
-                width=pw,
-                height=ph,
-                bg_color=QColor(0, 0, 0, 0),
-                draw_model=True,
-                object_transform=obj_trans
-            )
-            # Draw semi-transparent preview over the quad
-            painter.setOpacity(0.88)
-            painter.drawImage(int(self.img_rect.x()), int(self.img_rect.y()), prev_img)
-            painter.setOpacity(1.0)
+            if preview_mesh:
+                prev_img = self.renderer.render_to_image(
+                    mesh=preview_mesh,
+                    camera=cam_prev,
+                    lighting=self.lighting,
+                    style=RenderStyle.SHADED_WIREFRAME,
+                    width=pw,
+                    height=ph,
+                    bg_color=QColor(0, 0, 0, 0),
+                    draw_model=True,
+                    object_transform=obj_trans
+                )
+                painter.setOpacity(0.88)
+                painter.drawImage(int(self.img_rect.x()), int(self.img_rect.y()), prev_img)
+                painter.setOpacity(1.0)
 
-        # 6. Corner Pin Handles (Pins)
+        # 6. ON-SCREEN TRANSFORM GIZMO (Center Move ✥, Rotate ⟳, Scale ⤢)
+        c_w, move_rect, rot_pt, scale_pt = self._get_gizmo_parts()
+
+        # Connecting dashed lines
+        p_stem_rot = QPen(QColor(168, 85, 247, 200), 1.5, Qt.DashLine)
+        painter.setPen(p_stem_rot)
+        painter.drawLine(c_w, rot_pt)
+
+        p_stem_scale = QPen(QColor(245, 158, 11, 200), 1.5, Qt.DashLine)
+        painter.setPen(p_stem_scale)
+        painter.drawLine(c_w, scale_pt)
+
+        # Rotate Handle (at rot_pt)
+        is_rot_act = (self.active_gizmo_action == 'rotate' or self.hover_gizmo_part == 'rotate')
+        rot_bg = QColor(88, 28, 135) if is_rot_act else QColor(15, 23, 42, 230)
+        rot_border = QColor(216, 180, 254) if is_rot_act else QColor(168, 85, 247)
+        painter.setBrush(QBrush(rot_bg))
+        painter.setPen(QPen(rot_border, 2.0 if is_rot_act else 1.5))
+        painter.drawEllipse(rot_pt, 12, 12)
+        painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(QRectF(rot_pt.x() - 12, rot_pt.y() - 12, 24, 24), Qt.AlignCenter, "⟳")
+
+        # Scale Handle (at scale_pt)
+        is_scale_act = (self.active_gizmo_action == 'scale' or self.hover_gizmo_part == 'scale')
+        scale_bg = QColor(180, 83, 9) if is_scale_act else QColor(15, 23, 42, 230)
+        scale_border = QColor(253, 224, 71) if is_scale_act else QColor(245, 158, 11)
+        painter.setBrush(QBrush(scale_bg))
+        painter.setPen(QPen(scale_border, 2.0 if is_scale_act else 1.5))
+        painter.drawEllipse(scale_pt, 12, 12)
+        painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(QRectF(scale_pt.x() - 12, scale_pt.y() - 12, 24, 24), Qt.AlignCenter, "⤢")
+
+        # Center Move Disc Handle (at c_w)
+        is_move_act = (self.active_gizmo_action == 'move' or self.hover_gizmo_part == 'move')
+        move_bg = QColor(2, 132, 199) if is_move_act else QColor(15, 23, 42, 230)
+        move_border = QColor(125, 211, 252) if is_move_act else QColor(56, 189, 248)
+        painter.setBrush(QBrush(move_bg))
+        painter.setPen(QPen(move_border, 2.0 if is_move_act else 1.5))
+        painter.drawEllipse(c_w, 13, 13)
+        painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(QRectF(c_w.x() - 13, c_w.y() - 13, 26, 26), Qt.AlignCenter, "✥")
+
+        # 7. Corner Pin Handles (Pins)
         handle_colors = [
             QColor(34, 197, 94),   # 0: Front-Left (Green)
             QColor(239, 68, 68),   # 1: Front-Right (Red)
@@ -1176,7 +1600,7 @@ class GroundCalibratorWidget(QWidget):
             else:
                 painter.drawText(int(pt.x() + r + 4), int(pt.y() + 4), name)
 
-        # 7. Sequential Picking Mode Banner & Rubber-band Guides
+        # 8. Sequential Picking Mode Banner & Rubber-band Guides
         if self.is_picking_mode:
             painter.setBrush(QBrush(QColor(15, 23, 42, 230)))
             painter.setPen(Qt.NoPen)
@@ -1237,20 +1661,25 @@ class GroundCalibratorWidget(QWidget):
         painter.end()
 
 
+# =========================================================================
+# UNIFIED GROUND CALIBRATOR & 3D PRIMITIVE DRAWER DIALOG
+# =========================================================================
 class GroundCalibratorDialog(QDialog):
     """
-    Dialog window allowing the artist to define a ground perspective rectangle
-    and automatically place the 3D model on top of it.
+    Unified Perspective Calibrator & 3D Primitive Placement Dialog.
+    Allows artists to calibrate camera perspective and ground planes,
+    draw 3D primitives (Box, Cylinder, Sphere, Pyramid, Cone, Plane),
+    or place imported 3D models directly on canvas perspective.
     """
     applied = pyqtSignal(dict)
 
     def __init__(self, bg_image=None, mesh=None, camera=None, lighting=None,
-                 renderer=None, frame_rect=None, parent=None):
+                 renderer=None, frame_rect=None, start_in_click_draw=False,
+                 initial_mode=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("3D Ground Calibrator — Perspective Matching")
+        self.setWindowTitle("3D Ground Calibrator & Primitive Drawer — Perspective Matching")
 
         # Window sizing & geometry restoration:
-        # Default: 90% of screen size, centered. Remembers size and position across sessions.
         saved_geo = load_ground_dialog_geometry()
         restored = False
         if saved_geo:
@@ -1281,6 +1710,16 @@ class GroundCalibratorDialog(QDialog):
             }
             QPushButton:hover { background: #3d4352; color: #fff; }
             QPushButton:pressed { background: #242730; }
+            QComboBox {
+                background: #1e293b; color: #f1f5f9; border: 1px solid #334155;
+                border-radius: 4px; padding: 3px 8px; font-size: 11px; font-weight: bold;
+            }
+            QComboBox:hover { border-color: #38bdf8; }
+            QComboBox::drop-down { border: none; width: 18px; }
+            QComboBox QAbstractItemView {
+                background: #0f172a; color: #f1f5f9; selection-background-color: #2563eb;
+                border: 1px solid #334155;
+            }
         """)
 
         layout = QVBoxLayout(self)
@@ -1289,40 +1728,91 @@ class GroundCalibratorDialog(QDialog):
 
         # Header description
         hdr = QLabel(
-            "📐 <b>Ground Calibrator</b>: Match camera perspective and fit 3D models to your canvas ground plane.<br>"
+            "📐 <b>Perspective Calibrator & 3D Primitive Placement</b>: Fit 3D primitives or imported models to your canvas ground plane.<br>"
             "<span style='color:#94a3b8;font-size:10px;'>"
-            "Drag the 4 corner pins (<b style='color:#22c55e;'>1 FL</b>, <b style='color:#ef4444;'>2 FR</b>, "
-            "<b style='color:#3b82f6;'>3 BR</b>, <b style='color:#eab308;'>4 BL</b>), drag <b style='color:#c084fc;'>5 H</b> to adjust height, "
-            "or use <b>✏️ Draw</b>, <b>📍 4-Point Draw</b>, or <b>📍 5-Point Draw</b>.</span>"
+            "Drag corner pins (<b style='color:#22c55e;'>1 FL</b>, <b style='color:#ef4444;'>2 FR</b>, "
+            "<b style='color:#3b82f6;'>3 BR</b>, <b style='color:#eab308;'>4 BL</b>), drag <b style='color:#c084fc;'>5 H</b> for height, "
+            "drag <b style='color:#facc15;'>Horizon line</b> to tilt eye level, or use the <b>center Gizmo</b> (and Shift/Ctrl modifiers) to Move, Rotate, and Scale.</span>"
         )
         hdr.setWordWrap(True)
         layout.addWidget(hdr)
 
         # =========================================================================
-        # TOP TOOLBAR: Draw, 4-Point Draw, 5-Point Draw, Flip 180, Center, Reset
+        # TOP TOOLBAR: Modes, Primitive Selector, Aspect Presets, Controls
         # =========================================================================
         top_bar = QHBoxLayout()
         top_bar.setSpacing(6)
 
         btn_draw = QPushButton("✏️ Draw Rect")
-        btn_draw.setStyleSheet("background:#1e293b; color:#38bdf8; font-weight:bold; border:1px solid #0284c7; padding:5px 12px;")
+        btn_draw.setStyleSheet("background:#1e293b; color:#38bdf8; font-weight:bold; border:1px solid #0284c7; padding:4px 10px;")
         btn_draw.setToolTip("Click and drag across canvas to draw a ground perspective rectangle")
         btn_draw.clicked.connect(self._on_draw_clicked)
         top_bar.addWidget(btn_draw)
 
         btn_pick_4 = QPushButton("📍 4-Point Draw")
-        btn_pick_4.setStyleSheet("background:#1e293b; color:#facc15; font-weight:bold; border:1px solid #ca8a04; padding:5px 12px;")
+        btn_pick_4.setStyleSheet("background:#1e293b; color:#facc15; font-weight:bold; border:1px solid #ca8a04; padding:4px 10px;")
         btn_pick_4.setToolTip("Click 4 consecutive corners on your canvas (1 Front-Left, 2 Front-Right, 3 Back-Right, 4 Back-Left)")
         btn_pick_4.clicked.connect(lambda: self._on_pick_clicked(4))
         top_bar.addWidget(btn_pick_4)
 
         btn_pick_5 = QPushButton("📍 5-Point Draw")
-        btn_pick_5.setStyleSheet("background:#1e293b; color:#c084fc; font-weight:bold; border:1px solid #9333ea; padding:5px 12px;")
+        btn_pick_5.setStyleSheet("background:#1e293b; color:#c084fc; font-weight:bold; border:1px solid #9333ea; padding:4px 10px;")
         btn_pick_5.setToolTip("Click 4 corners for the base + 1 fifth point to define the vertical height in perspective!")
         btn_pick_5.clicked.connect(lambda: self._on_pick_clicked(5))
         top_bar.addWidget(btn_pick_5)
 
-        self.chk_keep_horizon = QCheckBox("Keep Horizon Horizontal")
+        # Separator line
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.VLine)
+        sep1.setStyleSheet("color:#334155;")
+        top_bar.addWidget(sep1)
+
+        # Primitive Type selector
+        lbl_prim = QLabel("Object:")
+        lbl_prim.setStyleSheet("color:#94a3b8; font-weight:bold;")
+        top_bar.addWidget(lbl_prim)
+
+        self.combo_primitive = QComboBox()
+        self.combo_primitive.addItems([
+            "📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane"
+        ])
+        if mesh and getattr(mesh, 'vertices', None) and not getattr(mesh, 'primitive_type', None):
+            self.combo_primitive.addItem("📁 Loaded 3D Model")
+            self.combo_primitive.setCurrentText("📁 Loaded 3D Model")
+        elif mesh and getattr(mesh, 'primitive_type', None):
+            pt = getattr(mesh, 'primitive_type')
+            for i in range(self.combo_primitive.count()):
+                if pt.lower() in self.combo_primitive.itemText(i).lower():
+                    self.combo_primitive.setCurrentIndex(i)
+                    break
+        else:
+            self.combo_primitive.setCurrentText("📦 Box")
+        self.combo_primitive.currentTextChanged.connect(self._on_primitive_changed)
+        top_bar.addWidget(self.combo_primitive)
+
+        # Aspect Presets
+        lbl_asp = QLabel("Aspect:")
+        lbl_asp.setStyleSheet("color:#94a3b8; font-weight:bold;")
+        top_bar.addWidget(lbl_asp)
+
+        self.combo_aspect = QComboBox()
+        self.combo_aspect.addItems([
+            "Free",
+            "1:1:1 Cube",
+            "1:2:1 Standing Block",
+            "1:3:1 Human / Character",
+            "2:1:3 Room / Interior",
+            "4:1:4 Wide Stage"
+        ])
+        self.combo_aspect.currentTextChanged.connect(self._on_aspect_changed)
+        top_bar.addWidget(self.combo_aspect)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.VLine)
+        sep2.setStyleSheet("color:#334155;")
+        top_bar.addWidget(sep2)
+
+        self.chk_keep_horizon = QCheckBox("Keep Horizon Level")
         self.chk_keep_horizon.setChecked(True)
         self.chk_keep_horizon.setToolTip("Lock camera roll to 0° so the horizon line stays completely horizontal")
         self.chk_keep_horizon.stateChanged.connect(self._on_keep_horizon_toggled)
@@ -1343,6 +1833,11 @@ class GroundCalibratorDialog(QDialog):
         btn_reset.clicked.connect(self._on_reset_clicked)
         top_bar.addWidget(btn_reset)
 
+        btn_history = QPushButton("🕒 History")
+        btn_history.setToolTip("Pick a recently placed primitive or perspective")
+        btn_history.clicked.connect(self._on_history_clicked)
+        top_bar.addWidget(btn_history)
+
         top_bar.addStretch(1)
         layout.addLayout(top_bar)
 
@@ -1360,8 +1855,12 @@ class GroundCalibratorDialog(QDialog):
         self.calibrator_widget.guidance_changed.connect(self._set_guidance)
         layout.addWidget(self.calibrator_widget, 1)
 
-        # Status / Guidance guidance bar
-        self.lbl_guidance = QLabel("📐 Ready: Drag corner pins or click '✏️ Draw' / '📍 4-Point Draw' / '📍 5-Point Draw' to match ground perspective.")
+        # Sync initial primitive selection to widget
+        cur_prim_clean = self.combo_primitive.currentText().split()[-1]
+        self.calibrator_widget.set_primitive_type(cur_prim_clean)
+
+        # Status / Guidance bar
+        self.lbl_guidance = QLabel("📐 Ready: Drag corner pins, horizon line, or center Gizmo to adjust perspective.")
         self.lbl_guidance.setWordWrap(True)
         self.lbl_guidance.setStyleSheet(
             "font-family:'Segoe UI'; font-size:11px; color:#38bdf8; "
@@ -1382,11 +1881,11 @@ class GroundCalibratorDialog(QDialog):
         bot_bar.setSpacing(6)
         bot_bar.addStretch(1)
 
-        btn_apply = QPushButton("✔ Place Model on Ground & Apply")
+        btn_apply = QPushButton("✔ Place & Apply to Scene")
         btn_apply.setStyleSheet(
-            "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 16px; font-size:12px; font-weight:bold;"
+            "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 18px; font-size:12px; font-weight:bold;"
         )
-        btn_apply.setToolTip("Applies the solved camera and places the 3D model directly on top of the ground rectangle")
+        btn_apply.setToolTip("Applies the calibrated camera and creates/places the 3D model directly on top of the ground rectangle")
         btn_apply.clicked.connect(self._apply)
         bot_bar.addWidget(btn_apply)
 
@@ -1395,6 +1894,16 @@ class GroundCalibratorDialog(QDialog):
         bot_bar.addWidget(btn_close)
 
         layout.addLayout(bot_bar)
+
+        # Initial mode trigger
+        if start_in_click_draw:
+            self.combo_primitive.setCurrentText("📦 Box")
+            self.calibrator_widget.set_primitive_type("Box")
+            self.calibrator_widget.start_drag_mode()
+        elif initial_mode == 4:
+            self._start_4point_pick()
+        elif initial_mode == 5:
+            self._start_5point_pick()
 
         self._on_solution_changed(self.calibrator_widget.last_solution)
 
@@ -1427,6 +1936,12 @@ class GroundCalibratorDialog(QDialog):
     def _on_pick_clicked(self, n=4):
         self.calibrator_widget.start_pick_mode(n)
 
+    def _start_4point_pick(self):
+        self.calibrator_widget.start_pick_mode(4)
+
+    def _start_5point_pick(self):
+        self.calibrator_widget.start_pick_mode(5)
+
     def _on_center_clicked(self):
         self.calibrator_widget.center_quad()
 
@@ -1438,6 +1953,52 @@ class GroundCalibratorDialog(QDialog):
 
     def _on_flip_clicked(self):
         self.calibrator_widget.toggle_flip_yaw()
+
+    def _on_primitive_changed(self, text):
+        clean_name = text.split()[-1] if text else "Box"
+        self.calibrator_widget.set_primitive_type(clean_name)
+
+    def _on_aspect_changed(self, text):
+        self.calibrator_widget.set_aspect_preset(text)
+
+    def _on_history_clicked(self):
+        history = load_primitive_history()
+        menu = QMenu(self)
+        menu.setStyleSheet("QMenu { background:#1e293b; color:#f1f5f9; border:1px solid #334155; } QMenu::item:selected { background:#2563eb; }")
+        if not history:
+            act = menu.addAction("No previous primitives")
+            act.setEnabled(False)
+        else:
+            for item in history[:10]:
+                ptype = item.get("primitive_type", "Box")
+                bw = item.get("box_w", 2.0)
+                bh = item.get("box_h", 2.0)
+                bd = item.get("box_d", 2.0)
+                t_str = item.get("timestamp", "")
+                title = f"{ptype} ({bw:.1f} × {bh:.1f} × {bd:.1f})  -  {t_str}"
+                act = menu.addAction(title)
+                act.triggered.connect(lambda ch, ent=item: self._apply_history_entry(ent))
+        btn = self.sender()
+        if btn:
+            menu.exec_(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def _apply_history_entry(self, entry):
+        ptype = entry.get("primitive_type", "Box")
+        for i in range(self.combo_primitive.count()):
+            if ptype.lower() in self.combo_primitive.itemText(i).lower():
+                self.combo_primitive.setCurrentIndex(i)
+                break
+        self.calibrator_widget.set_primitive_type(ptype)
+        bh = float(entry.get("box_h", 2.0))
+        self.calibrator_widget.last_solution["rect_height"] = bh
+        corners_3d = self.calibrator_widget.last_solution.get("corners_3d")
+        base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
+        doc_w, doc_h = self.calibrator_widget._get_doc_size()
+        self.calibrator_widget.height_norm_pt = project_height_to_norm_point(
+            self.calibrator_widget.camera, doc_w, doc_h, base_corner_3d, bh, self.calibrator_widget.frame_rect
+        )
+        self.calibrator_widget._recalculate()
+        self.calibrator_widget.update()
 
     def _set_guidance(self, text, level="info"):
         level_styles = {
@@ -1461,12 +2022,53 @@ class GroundCalibratorDialog(QDialog):
         rw = sol.get("rect_width", 2.0)
         rd = sol.get("rect_depth", 2.0)
         rh = sol.get("rect_height", 2.0)
+        pt = getattr(self.calibrator_widget, 'primitive_type', 'Box')
         self.lbl_stats.setText(
-            f"Yaw: {yaw:5.1f}° | Tilt/Pitch: {pitch:5.1f}° | Roll: {roll:5.1f}° | FOV: {fov:5.1f}° | Dist: {dist:4.2f} | Ground Size: {rw:4.2f} × {rd:4.2f} | Height: {rh:4.2f}"
+            f"Object: {pt} | Ground: {rw:4.2f} × {rd:4.2f} | Height: {rh:4.2f} | Tilt: {pitch:5.1f}° | Yaw: {yaw:5.1f}° | FOV: {fov:5.1f}° | Dist: {dist:4.2f}"
         )
 
     def _apply(self):
         self._save_geom()
-        self.applied.emit(self.calibrator_widget.last_solution)
+        sol = dict(self.calibrator_widget.last_solution)
+        ptype = self.calibrator_widget.primitive_type
+        rw = float(sol.get("rect_width", 2.0))
+        rd = float(sol.get("rect_depth", 2.0))
+        rh = float(sol.get("rect_height", 2.0))
+
+        sol["primitive_type"] = ptype
+        sol["box_w"] = rw
+        sol["box_h"] = rh
+        sol["box_d"] = rd
+
+        if ptype == "Box":
+            sol["mesh"] = create_box_primitive(rw, rh, rd)
+        elif ptype == "Cylinder":
+            sol["mesh"] = create_cylinder_primitive(rw * 0.5, rh, 24)
+        elif ptype == "Sphere":
+            sol["mesh"] = create_sphere_primitive(rw * 0.5, 16, 24)
+        elif ptype == "Pyramid":
+            sol["mesh"] = create_pyramid_primitive(rw, rh, rd)
+        elif ptype == "Cone":
+            sol["mesh"] = create_cone_primitive(rw * 0.5, rh, 24)
+        elif ptype == "Plane":
+            sol["mesh"] = create_plane_primitive(rw, rd, 2)
+        elif ptype == "Loaded 3D Model":
+            sol["mesh"] = None  # Docker retains current mesh and applies scale
+        else:
+            sol["mesh"] = create_box_primitive(rw, rh, rd)
+
+        try:
+            add_primitive_to_history({
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "primitive_type": ptype,
+                "box_w": rw, "box_h": rh, "box_d": rd,
+                "yaw": sol.get("yaw", 180.0),
+                "pitch": sol.get("pitch", 15.0),
+                "fov": sol.get("fov", 45.0)
+            })
+        except Exception:
+            pass
+
+        self.applied.emit(sol)
         self.accept()
 

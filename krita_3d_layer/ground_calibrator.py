@@ -607,7 +607,7 @@ class GroundCalibratorWidget(QWidget):
         self.hovered_handle = None
         self.is_picking_mode = False
         self.pick_mode_points = 4
-        self.has_height_point = True
+        self.has_height_point = False
         self.height_norm_pt = None
         self.is_drag_mode = False
         self.drag_start_pos = None
@@ -617,11 +617,12 @@ class GroundCalibratorWidget(QWidget):
         self.current_cursor_pos = None
 
         # Primitive selection & aspect preset
-        self.primitive_type = "Box"
+        self.primitive_type = "Ground Rectangle"
         if self.mesh and hasattr(self.mesh, 'primitive_type') and self.mesh.primitive_type:
             self.primitive_type = self.mesh.primitive_type
         elif self.mesh and getattr(self.mesh, 'vertices', None):
             self.primitive_type = "Loaded 3D Model"
+        self.has_height_point = (self.primitive_type in ("Box", "Cylinder", "Pyramid", "Cone"))
         self.aspect_preset = "Free"
 
         # Horizon interaction
@@ -650,7 +651,7 @@ class GroundCalibratorWidget(QWidget):
         self._recalculate()
 
     def set_primitive_type(self, ptype):
-        """Sets active 3D primitive type or loaded model."""
+        """Sets active 3D primitive type, ground rectangle, or loaded model."""
         self.primitive_type = ptype
         if ptype in ("Box", "Cylinder", "Pyramid", "Cone"):
             self.has_height_point = True
@@ -659,7 +660,7 @@ class GroundCalibratorWidget(QWidget):
             rh = self.last_solution.get("rect_height", 2.0)
             doc_w, doc_h = self._get_doc_size()
             self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
-        elif ptype in ("Sphere", "Plane", "Loaded 3D Model"):
+        else:
             self.has_height_point = False
             self.height_norm_pt = None
         self._recalculate()
@@ -1677,7 +1678,10 @@ class GroundCalibratorDialog(QDialog):
                  renderer=None, frame_rect=None, start_in_click_draw=False,
                  initial_mode=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("3D Ground Calibrator & Primitive Drawer — Perspective Matching")
+        if start_in_click_draw or initial_mode in ("box", "primitive"):
+            self.setWindowTitle("✏️ Draw 3D Primitive & Perspective Calibrator")
+        else:
+            self.setWindowTitle("📐 Draw Ground Rectangle & Perspective Calibrator")
 
         # Window sizing & geometry restoration:
         saved_geo = load_ground_dialog_geometry()
@@ -1728,9 +1732,9 @@ class GroundCalibratorDialog(QDialog):
 
         # Header description
         hdr = QLabel(
-            "📐 <b>Perspective Calibrator & 3D Primitive Placement</b>: Fit 3D primitives or imported models to your canvas ground plane.<br>"
+            "📐 <b>Ground Calibrator & Perspective Matching</b>: Match camera perspective and fit 3D models or primitives to your canvas ground plane.<br>"
             "<span style='color:#94a3b8;font-size:10px;'>"
-            "Drag corner pins (<b style='color:#22c55e;'>1 FL</b>, <b style='color:#ef4444;'>2 FR</b>, "
+            "Drag the 4 corner pins (<b style='color:#22c55e;'>1 FL</b>, <b style='color:#ef4444;'>2 FR</b>, "
             "<b style='color:#3b82f6;'>3 BR</b>, <b style='color:#eab308;'>4 BL</b>), drag <b style='color:#c084fc;'>5 H</b> for height, "
             "drag <b style='color:#facc15;'>Horizon line</b> to tilt eye level, or use the <b>center Gizmo</b> (and Shift/Ctrl modifiers) to Move, Rotate, and Scale.</span>"
         )
@@ -1773,20 +1777,24 @@ class GroundCalibratorDialog(QDialog):
         top_bar.addWidget(lbl_prim)
 
         self.combo_primitive = QComboBox()
-        self.combo_primitive.addItems([
-            "📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane"
-        ])
+        prim_items = ["📐 Ground Rectangle"]
         if mesh and getattr(mesh, 'vertices', None) and not getattr(mesh, 'primitive_type', None):
-            self.combo_primitive.addItem("📁 Loaded 3D Model")
-            self.combo_primitive.setCurrentText("📁 Loaded 3D Model")
+            prim_items.insert(0, "📁 Loaded 3D Model")
+        prim_items.extend(["📦 Box", "🛢️ Cylinder", "🔮 Sphere", "📐 Pyramid", "🍦 Cone", "🏁 Plane"])
+        self.combo_primitive.addItems(prim_items)
+
+        if start_in_click_draw or initial_mode in ("box", "primitive", 5):
+            self.combo_primitive.setCurrentText("📦 Box")
         elif mesh and getattr(mesh, 'primitive_type', None):
             pt = getattr(mesh, 'primitive_type')
             for i in range(self.combo_primitive.count()):
                 if pt.lower() in self.combo_primitive.itemText(i).lower():
                     self.combo_primitive.setCurrentIndex(i)
                     break
+        elif mesh and getattr(mesh, 'vertices', None):
+            self.combo_primitive.setCurrentText("📁 Loaded 3D Model")
         else:
-            self.combo_primitive.setCurrentText("📦 Box")
+            self.combo_primitive.setCurrentText("📐 Ground Rectangle")
         self.combo_primitive.currentTextChanged.connect(self._on_primitive_changed)
         top_bar.addWidget(self.combo_primitive)
 
@@ -1856,7 +1864,13 @@ class GroundCalibratorDialog(QDialog):
         layout.addWidget(self.calibrator_widget, 1)
 
         # Sync initial primitive selection to widget
-        cur_prim_clean = self.combo_primitive.currentText().split()[-1]
+        cur_prim_text = self.combo_primitive.currentText()
+        if "Ground" in cur_prim_text or "Rectangle" in cur_prim_text:
+            cur_prim_clean = "Ground Rectangle"
+        elif "Model" in cur_prim_text:
+            cur_prim_clean = "Loaded 3D Model"
+        else:
+            cur_prim_clean = cur_prim_text.split()[-1]
         self.calibrator_widget.set_primitive_type(cur_prim_clean)
 
         # Status / Guidance bar
@@ -1881,11 +1895,11 @@ class GroundCalibratorDialog(QDialog):
         bot_bar.setSpacing(6)
         bot_bar.addStretch(1)
 
-        btn_apply = QPushButton("✔ Place & Apply to Scene")
+        btn_apply = QPushButton("✔ Place Model on Ground & Apply")
         btn_apply.setStyleSheet(
             "background:#2563eb; color:#ffffff; border:1px solid #1d4ed8; padding:6px 18px; font-size:12px; font-weight:bold;"
         )
-        btn_apply.setToolTip("Applies the calibrated camera and creates/places the 3D model directly on top of the ground rectangle")
+        btn_apply.setToolTip("Applies the calibrated camera and places the 3D model/primitive directly on top of the ground rectangle")
         btn_apply.clicked.connect(self._apply)
         bot_bar.addWidget(btn_apply)
 
@@ -1896,14 +1910,18 @@ class GroundCalibratorDialog(QDialog):
         layout.addLayout(bot_bar)
 
         # Initial mode trigger
-        if start_in_click_draw:
+        if start_in_click_draw or initial_mode in ("box", "primitive"):
             self.combo_primitive.setCurrentText("📦 Box")
             self.calibrator_widget.set_primitive_type("Box")
             self.calibrator_widget.start_drag_mode()
         elif initial_mode == 4:
             self._start_4point_pick()
         elif initial_mode == 5:
+            if "Ground Rectangle" in self.combo_primitive.currentText():
+                self.combo_primitive.setCurrentText("📦 Box")
             self._start_5point_pick()
+        elif initial_mode in ("draw", "drag"):
+            self.start_drag_mode()
 
         self._on_solution_changed(self.calibrator_widget.last_solution)
 
@@ -1931,16 +1949,28 @@ class GroundCalibratorDialog(QDialog):
         super().reject()
 
     def _on_draw_clicked(self):
-        self.calibrator_widget.start_drag_mode()
+        if hasattr(self, 'calibrator_widget'):
+            self.calibrator_widget.start_drag_mode()
 
     def _on_pick_clicked(self, n=4):
-        self.calibrator_widget.start_pick_mode(n)
+        if hasattr(self, 'calibrator_widget'):
+            self.calibrator_widget.start_pick_mode(n)
 
     def _start_4point_pick(self):
-        self.calibrator_widget.start_pick_mode(4)
+        if hasattr(self, 'calibrator_widget'):
+            self.calibrator_widget.start_pick_mode(4)
 
     def _start_5point_pick(self):
-        self.calibrator_widget.start_pick_mode(5)
+        if hasattr(self, 'calibrator_widget'):
+            self.calibrator_widget.start_pick_mode(5)
+
+    def start_pick_mode(self, n=4):
+        if hasattr(self, 'calibrator_widget'):
+            self.calibrator_widget.start_pick_mode(n)
+
+    def start_drag_mode(self):
+        if hasattr(self, 'calibrator_widget'):
+            self.calibrator_widget.start_drag_mode()
 
     def _on_center_clicked(self):
         self.calibrator_widget.center_quad()
@@ -1955,7 +1985,14 @@ class GroundCalibratorDialog(QDialog):
         self.calibrator_widget.toggle_flip_yaw()
 
     def _on_primitive_changed(self, text):
-        clean_name = text.split()[-1] if text else "Box"
+        if not text:
+            clean_name = "Ground Rectangle"
+        elif "Ground" in text or "Rectangle" in text:
+            clean_name = "Ground Rectangle"
+        elif "Model" in text:
+            clean_name = "Loaded 3D Model"
+        else:
+            clean_name = text.split()[-1]
         self.calibrator_widget.set_primitive_type(clean_name)
 
     def _on_aspect_changed(self, text):
@@ -2022,7 +2059,7 @@ class GroundCalibratorDialog(QDialog):
         rw = sol.get("rect_width", 2.0)
         rd = sol.get("rect_depth", 2.0)
         rh = sol.get("rect_height", 2.0)
-        pt = getattr(self.calibrator_widget, 'primitive_type', 'Box')
+        pt = getattr(self.calibrator_widget, 'primitive_type', 'Ground Rectangle')
         self.lbl_stats.setText(
             f"Object: {pt} | Ground: {rw:4.2f} × {rd:4.2f} | Height: {rh:4.2f} | Tilt: {pitch:5.1f}° | Yaw: {yaw:5.1f}° | FOV: {fov:5.1f}° | Dist: {dist:4.2f}"
         )
@@ -2040,7 +2077,9 @@ class GroundCalibratorDialog(QDialog):
         sol["box_h"] = rh
         sol["box_d"] = rd
 
-        if ptype == "Box":
+        if ptype in ("Ground Rectangle", "Loaded 3D Model", "Ground", "Model", None, ""):
+            sol["mesh"] = None  # Docker retains current mesh and places/aligns on ground
+        elif ptype == "Box":
             sol["mesh"] = create_box_primitive(rw, rh, rd)
         elif ptype == "Cylinder":
             sol["mesh"] = create_cylinder_primitive(rw * 0.5, rh, 24)
@@ -2052,10 +2091,8 @@ class GroundCalibratorDialog(QDialog):
             sol["mesh"] = create_cone_primitive(rw * 0.5, rh, 24)
         elif ptype == "Plane":
             sol["mesh"] = create_plane_primitive(rw, rd, 2)
-        elif ptype == "Loaded 3D Model":
-            sol["mesh"] = None  # Docker retains current mesh and applies scale
         else:
-            sol["mesh"] = create_box_primitive(rw, rh, rd)
+            sol["mesh"] = None
 
         try:
             add_primitive_to_history({

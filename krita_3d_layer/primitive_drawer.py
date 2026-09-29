@@ -1562,16 +1562,17 @@ class BoxDrawerWidget(QWidget):
 # Primitive Drawer & Calibrator Dialog
 # -----------------------------------------------------------------------------
 
-class PrimitiveDrawerDialog(QDialog):
+from .ground_calibrator import GroundCalibratorDialog
+
+class PrimitiveDrawerDialog(GroundCalibratorDialog):
     """
-    Unified dialog proxy: forwards to GroundCalibratorDialog so Draw Primitive
-    and Ground Calibrator share one unified, merged interface.
+    Primitive Drawer Dialog: inherits from GroundCalibratorDialog
+    and defaults to 3D primitive drawing mode.
     """
     applied = pyqtSignal(dict)
 
-    def __new__(cls, bg_image=None, camera=None, lighting=None, renderer=None, start_in_click_draw=False, parent=None, **kwargs):
-        from .ground_calibrator import GroundCalibratorDialog
-        return GroundCalibratorDialog(
+    def __init__(self, bg_image=None, camera=None, lighting=None, renderer=None, start_in_click_draw=False, parent=None, **kwargs):
+        super().__init__(
             bg_image=bg_image,
             mesh=kwargs.get("mesh"),
             camera=camera,
@@ -1579,7 +1580,7 @@ class PrimitiveDrawerDialog(QDialog):
             renderer=renderer,
             frame_rect=kwargs.get("frame_rect"),
             start_in_click_draw=start_in_click_draw,
-            initial_mode=kwargs.get("initial_mode"),
+            initial_mode="box" if start_in_click_draw else kwargs.get("initial_mode", "box"),
             parent=parent
         )
 

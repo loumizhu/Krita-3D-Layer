@@ -1241,14 +1241,14 @@ class Krita3DLayerDocker(DockWidget):
         self.sec_canvas = CollapsibleSection("GROUND & FRAMING", expanded=True)
 
         calib_row = QHBoxLayout(); calib_row.setSpacing(2)
-        self.btn_ground = QPushButton("📐 Ground 4P")
+        self.btn_ground = QPushButton("📐 Ground Rect")
         self.btn_ground.setStyleSheet("background:#2e3440; color:#93c5fd; font-weight:bold; padding:3px 4px; border:1px solid #4c566a; font-size:9px;")
         self.btn_ground.setToolTip(
-            "Ground Rectangle (4-Point Draw):\n"
-            "Define 4 ground pins to calibrate camera yaw, tilt, roll, and distance."
+            "Ground Rectangle (Draw & Calibrate):\n"
+            "Open the Ground Rectangle tool to calibrate camera yaw, tilt, roll, and place 3D model directly on canvas ground."
         )
-        self.btn_ground.clicked.connect(lambda: self._open_ground_calibrator(initial_mode=4))
-        calib_row.addWidget(self.btn_ground, 2)
+        self.btn_ground.clicked.connect(lambda: self._open_ground_calibrator())
+        calib_row.addWidget(self.btn_ground, 3)
 
         self.btn_ground_5p = QPushButton("📍 Ground 5P (H)")
         self.btn_ground_5p.setStyleSheet("background:#3b0764; color:#e9d5ff; font-weight:bold; padding:3px 4px; border:1px solid #7e22ce; font-size:9px;")
@@ -2915,7 +2915,15 @@ class Krita3DLayerDocker(DockWidget):
     # -----------------------------------------------------------------
     # Ground Perspective Calibrator Dialog
     # -----------------------------------------------------------------
-    def _open_ground_calibrator(self, initial_mode=None):
+    def drawRectangleGround(self, initial_mode=None, *args):
+        """Public alias for Ground Rectangle Calibrator."""
+        return self._open_ground_calibrator(initial_mode, *args)
+
+    def _open_ground_calibrator(self, initial_mode=None, *args):
+        # Sanitize initial_mode against PyQt event arguments (like boolean False)
+        if not isinstance(initial_mode, (int, str)):
+            initial_mode = None
+
         snapshot = CanvasSyncManager.get_canvas_snapshot()
         active_frame = self.frame_rect if (self.chk_use_frame.isChecked() and self.frame_rect) else None
         dlg = GroundCalibratorDialog(
@@ -2925,12 +2933,26 @@ class Krita3DLayerDocker(DockWidget):
             lighting=self.viewport.lighting,
             renderer=self.viewport.renderer,
             frame_rect=active_frame,
+            start_in_click_draw=(initial_mode in ("draw", "drag")),
+            initial_mode=initial_mode,
             parent=self
         )
         if initial_mode == 4:
-            dlg._start_4point_pick()
+            if hasattr(dlg, '_start_4point_pick'):
+                dlg._start_4point_pick()
+            elif hasattr(dlg, 'calibrator_widget') and hasattr(dlg.calibrator_widget, 'start_pick_mode'):
+                dlg.calibrator_widget.start_pick_mode(4)
         elif initial_mode == 5:
-            dlg._start_5point_pick()
+            if hasattr(dlg, '_start_5point_pick'):
+                dlg._start_5point_pick()
+            elif hasattr(dlg, 'calibrator_widget') and hasattr(dlg.calibrator_widget, 'start_pick_mode'):
+                dlg.calibrator_widget.start_pick_mode(5)
+        elif initial_mode in ("draw", "drag"):
+            if hasattr(dlg, 'start_drag_mode'):
+                dlg.start_drag_mode()
+            elif hasattr(dlg, 'calibrator_widget') and hasattr(dlg.calibrator_widget, 'start_drag_mode'):
+                dlg.calibrator_widget.start_drag_mode()
+
         sel = CanvasSyncManager.get_active_selection_rect()
         doc_info = CanvasSyncManager.get_document_info()
         if sel and doc_info and initial_mode is None:

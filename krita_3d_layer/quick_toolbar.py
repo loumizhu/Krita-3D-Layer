@@ -592,6 +592,8 @@ class QuickActionsToolbar(QWidget):
 
         if action_id == "draw_box":
             d._open_primitive_drawer(start_click_draw=True)
+        elif action_id in ("ground_rect", "draw_ground_rect", "drawRectangleGround"):
+            d._open_ground_calibrator()
         elif action_id == "ground_4p":
             d._open_ground_calibrator(initial_mode=4)
         elif action_id == "ground_5p":

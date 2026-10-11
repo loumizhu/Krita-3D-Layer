@@ -220,6 +220,37 @@ class CanvasSyncManager:
             if target_node.opacity() == 0:
                 target_node.setOpacity(255)
 
+        # Check and handle document color model & bit depth
+        color_model = doc.colorModel() if hasattr(doc, 'colorModel') else "RGBA"
+        color_depth = doc.colorDepth() if hasattr(doc, 'colorDepth') else "U8"
+
+        if color_model == "RGBA" and color_depth == "U16":
+            # Expand 8-bit ARGB32 to 16-bit uint16 (little-endian 2 bytes per channel)
+            u16_bytes = bytearray(len(pixel_data) * 2)
+            for i, b in enumerate(pixel_data):
+                val16 = b * 257
+                u16_bytes[i * 2] = val16 & 0xFF
+                u16_bytes[i * 2 + 1] = (val16 >> 8) & 0xFF
+            pixel_data = bytes(u16_bytes)
+        elif color_model == "GRAYA" and color_depth == "U8":
+            # Convert 4-channel BGRA to 2-channel Grayscale + Alpha
+            num_px = out_w * out_h
+            gray_bytes = bytearray(num_px * 2)
+            for i in range(num_px):
+                b = pixel_data[i * 4]
+                g = pixel_data[i * 4 + 1]
+                r = pixel_data[i * 4 + 2]
+                a = pixel_data[i * 4 + 3]
+                gray_val = int(0.299 * r + 0.587 * g + 0.114 * b)
+                gray_bytes[i * 2] = gray_val
+                gray_bytes[i * 2 + 1] = a
+            pixel_data = bytes(gray_bytes)
+        elif color_model not in ("RGBA", "GRAYA"):
+            raise RuntimeError(
+                f"Document color model '{color_model}' is not supported for 3D stamping. "
+                f"Please use an RGB canvas (Image -> Convert Image Color Space...)."
+            )
+
         # Write pixel data to layer
         target_node.setPixelData(pixel_data, out_x, out_y, out_w, out_h)
         if set_active:

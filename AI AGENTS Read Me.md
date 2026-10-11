@@ -238,11 +238,11 @@ python "E:\((_atWork_))\Krita-3D-Layer\install.py"
 ```
 
 This script does three things:
-1. **Copies** (not symlinks — `WinError 1314` on non-admin) the `krita_3d_layer/` package + `.desktop` file into `%APPDATA%\krita\pykrita\`.
+1. **Links via NTFS Directory Junction** (on Windows without requiring administrator privileges) or symlinks the `krita_3d_layer/` package + copies `.desktop` into `%APPDATA%\krita\pykrita\`. If junctions/symlinks fail, it falls back to copying.
 2. **Enables** the plugin in `kritarc` (`enable_krita_3d_layer=true`).
 3. **Live-injects** via the named pipe `\\.\pipe\runscriptz_socket` (if available) to hot-reload modules in the running Krita instance.
 
-> **IMPORTANT:** After modifying any source file, you MUST run `install.py` again. The files are **copied**, not symlinked. Changes to source files are NOT automatically reflected in Krita.
+> **NOTE:** With directory junctions enabled on Windows, changes in source files are linked directly to Krita's pykrita folder. If using live reload via runscriptz, running `install.py` will trigger module reload.
 
 ### Live Reload Mechanism
 The named pipe `\\.\pipe\runscriptz_socket` is provided by a separate Krita plugin (`runscriptz`). When available, `install.py` writes a bootstrap script path to it, which Krita executes internally. The bootstrap uses `importlib.reload()` on all modules in dependency order:

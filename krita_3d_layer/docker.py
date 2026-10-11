@@ -4013,6 +4013,13 @@ class Krita3DLayerDocker(DockWidget):
                     if os.path.exists(cand2):
                         self._load_file(cand2, frame=False)
                         loaded = True
+                if not loaded and ("asaro" in mpath.lower() or "head" in mpath.lower()):
+                    for alt_name in ("Asaro_Head_Studio.obj", "Asaro_Minimal.glb"):
+                        alt_cand = os.path.join(os.path.dirname(__file__), "3D-Primitive", alt_name)
+                        if os.path.exists(alt_cand):
+                            self._load_file(alt_cand, frame=False)
+                            loaded = True
+                            break
             if not loaded and data.get("primitive_type"):
                 ptype = data.get("primitive_type")
                 pparams = data.get("primitive_params", {})
@@ -4043,9 +4050,11 @@ class Krita3DLayerDocker(DockWidget):
                     loaded = True
 
             if not loaded and self.mesh is None and not data.get("primitive_type"):
-                default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", "Asaro Head Planes.obj")
-                if os.path.exists(default_asaro):
-                    self._load_file(default_asaro, frame=False)
+                for default_asaro_name in ("Asaro_Head_Studio.obj", "Asaro_Minimal.glb", "Asaro Head Planes.obj"):
+                    default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", default_asaro_name)
+                    if os.path.exists(default_asaro):
+                        self._load_file(default_asaro, frame=False)
+                        break
 
             # Restore Object Transform
             t = getattr(self.viewport, 'object_transform', None)

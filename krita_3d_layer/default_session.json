@@ -18,7 +18,7 @@
   "cam_fisheye_zoom": 1.0,
   "cam_lens_type": "Equidistant",
   "cam_crop_circle": false,
-  "mesh_path": "3D-Primitive/Asaro Head Planes.glb",
+  "mesh_path": "3D-Primitive/Asaro_Head_Studio.obj",
   "render_style": "Shaded + Wireframe",
   "base_color": "#848ba2",
   "wire_cull": true,

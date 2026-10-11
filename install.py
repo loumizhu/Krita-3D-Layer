@@ -35,25 +35,44 @@ def install_files():
     shutil.copy2(DESKTOP_SRC, DESKTOP_DEST)
     print(f"  -> Copied {DESKTOP_SRC} to {DESKTOP_DEST}")
 
-    # 2. Package directory (use Junction or copy)
-    if os.path.exists(PACKAGE_DEST):
-        if os.path.islink(PACKAGE_DEST) or os.path.isdir(PACKAGE_DEST):
-            try:
-                if os.path.islink(PACKAGE_DEST):
-                    os.unlink(PACKAGE_DEST)
-                else:
+    # 2. Package directory (use Directory Junction, symlink, or copy)
+    if os.path.exists(PACKAGE_DEST) or os.path.islink(PACKAGE_DEST):
+        try:
+            if os.path.islink(PACKAGE_DEST):
+                os.unlink(PACKAGE_DEST)
+            else:
+                try:
+                    os.rmdir(PACKAGE_DEST)
+                except Exception:
                     shutil.rmtree(PACKAGE_DEST)
-            except Exception as e:
-                print(f"  Warning removing existing destination: {e}")
+        except Exception as e:
+            print(f"  Warning removing existing destination: {e}")
 
-    try:
-        # Create directory junction / symlink on Windows
-        os.symlink(PACKAGE_SRC, PACKAGE_DEST, target_is_directory=True)
-        print(f"  -> Created junction/symlink: {PACKAGE_DEST} -> {PACKAGE_SRC}")
-    except Exception as e:
-        print(f"  -> Symlink not permitted, copying directory: {e}")
+    installed_via_link = False
+    if sys.platform == "win32":
+        try:
+            import _winapi
+            _winapi.CreateJunction(PACKAGE_SRC, PACKAGE_DEST)
+            print(f"  -> Created directory junction: {PACKAGE_DEST} -> {PACKAGE_SRC}")
+            installed_via_link = True
+        except Exception:
+            try:
+                os.symlink(PACKAGE_SRC, PACKAGE_DEST, target_is_directory=True)
+                print(f"  -> Created symlink: {PACKAGE_DEST} -> {PACKAGE_SRC}")
+                installed_via_link = True
+            except Exception:
+                pass
+    else:
+        try:
+            os.symlink(PACKAGE_SRC, PACKAGE_DEST, target_is_directory=True)
+            print(f"  -> Created symlink: {PACKAGE_DEST} -> {PACKAGE_SRC}")
+            installed_via_link = True
+        except Exception:
+            pass
+
+    if not installed_via_link:
         shutil.copytree(PACKAGE_SRC, PACKAGE_DEST)
-        print(f"  -> Copied {PACKAGE_SRC} to {PACKAGE_DEST}")
+        print(f"  -> Copied directory: {PACKAGE_SRC} to {PACKAGE_DEST}")
 
 
 def enable_in_kritarc():

@@ -64,6 +64,7 @@
   "quality": "Balanced",
   "debounce_ms": 120,
   "live_sync": true,
+  "target_layer_mode": "active",
   "transparent_bg": true,
   "custom_bg": "#ffffff",
   "sticky_viewport": true,

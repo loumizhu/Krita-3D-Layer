@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup, QDoubleSpinBox, QSpinBox, QMenu,
     QInputDialog, QMessageBox
 )
-from PyQt5.QtGui import QColor, QFont, QDesktopServices
+from PyQt5.QtGui import QColor, QFont, QDesktopServices, QIcon
 from PyQt5.QtCore import Qt, QTimer, QUrl
 
 try:
@@ -1358,6 +1358,28 @@ class Krita3DLayerDocker(DockWidget):
         self.lbl_frame_info.setStyleSheet("color:#64748b; font-size:9px;")
         self.sec_canvas.add_widget(self.lbl_frame_info)
 
+        # Target Layer & Stamp Controls
+        stamp_row = QHBoxLayout(); stamp_row.setSpacing(4)
+        self.combo_target_layer = QComboBox()
+        self.combo_target_layer.addItem("⚡ Active Layer", "active")
+        self.combo_target_layer.addItem("📄 New Layer on Top", "new")
+        self.combo_target_layer.addItem("🔄 3D Ref Layer", "named")
+        self.combo_target_layer.setToolTip(
+            "Target Krita layer for stamping:\n"
+            "• Active Layer: Stamps directly into whichever layer you have selected\n"
+            "• New Layer on Top: Creates a fresh layer directly above current artwork\n"
+            "• 3D Ref Layer: Syncs to dedicated '3D Perspective & Model' layer"
+        )
+        self.combo_target_layer.currentIndexChanged.connect(self._schedule_save)
+        stamp_row.addWidget(self.combo_target_layer, 1)
+
+        self.btn_stamp_canvas = QPushButton("⚡ Stamp Now")
+        self.btn_stamp_canvas.setStyleSheet("background:#2563eb; color:#ffffff; font-weight:bold; padding:3px 8px; border-radius:3px;")
+        self.btn_stamp_canvas.setToolTip("Manually stamp 3D scene onto chosen Krita layer right now")
+        self.btn_stamp_canvas.clicked.connect(lambda: self._stamp())
+        stamp_row.addWidget(self.btn_stamp_canvas, 0)
+        self.sec_canvas.add_layout(stamp_row)
+
         self.lbl_status = QLabel("Ready")
         self.lbl_status.setStyleSheet("color:#94a3b8;font-size:9px;")
         self.lbl_status.setAlignment(Qt.AlignHCenter)
@@ -1525,8 +1547,8 @@ class Krita3DLayerDocker(DockWidget):
 
         self.btn_stamp = QPushButton("⚡ Stamp Now")
         self.btn_stamp.setStyleSheet("background:#2563eb; color:#fff; font-weight:bold; padding:3px 6px;")
-        self.btn_stamp.setToolTip("Manually stamp 3D scene onto active Krita layer right now")
-        self.btn_stamp.clicked.connect(self._stamp)
+        self.btn_stamp.setToolTip("Manually stamp 3D scene onto chosen Krita layer right now")
+        self.btn_stamp.clicked.connect(lambda: self._stamp())
         sync_row.addWidget(self.btn_stamp, 0)
         self.sec_settings.add_layout(sync_row)
 
@@ -3572,36 +3594,13 @@ class Krita3DLayerDocker(DockWidget):
         if self.chk_live.isChecked():
             self.live_sync_timer.start(self.debounce_ms)
 
-    def _do_live_sync(self):
-        if self.chk_live.isChecked():
-            self._stamp()
-
-    def _on_camera_changed(self):
-        self._sync_ui()
-        self._live_sync()
-
-    def _on_interaction_ended(self):
-        self._ensure_layer_visible()
-        if self.chk_live.isChecked():
-            self.live_sync_timer.stop()
-            self._stamp()
-
-    def _on_viewport_fov_changed(self, fov):
-        self.sl_fov.blockSignals(True)
-        self.sl_fov.setValue(int(fov))
-        self.sl_fov.blockSignals(False)
-        self._update_fov_label(fov)
-
-    def _stamp(self):
-        has_mesh = bool(self.mesh and self.mesh.vertices)
+    def _live_render_to_canvas(self):
+        if not self.chk_live.isChecked():
+            return
+        has_mesh = bool(self.mesh and getattr(self.mesh, 'vertices', None))
         has_grid = bool(self.chk_grid_canvas.isChecked())
         if not has_mesh and not has_grid:
             return
-
-        quality_idx = self.combo_quality.currentIndex()
-        # Always render at full document resolution to prevent canvas frame corruption
-        # Quality setting only affects viewport anti-aliasing, not canvas render dimensions
-        scale_factor = 1.0
 
         grid_settings = self.viewport.grid_settings if has_grid else None
         active_frame = self.frame_rect if (self.chk_use_frame.isChecked() and self.frame_rect) else None
@@ -3617,15 +3616,101 @@ class Krita3DLayerDocker(DockWidget):
                 layer_name="3D Perspective & Model",
                 transparent_bg=self.chk_transp.isChecked(),
                 custom_bg=self.custom_bg_color,
-                scale_factor=scale_factor,
+                scale_factor=1.0,
                 frame=active_frame,
                 grid_settings=grid_settings,
                 draw_model=has_mesh,
-                object_transform=self.viewport.object_transform
+                object_transform=self.viewport.object_transform,
+                set_active=False
             )
-            self.lbl_status.setText("Layer updated")
+            self.lbl_status.setText("Live ref layer updated")
         except Exception as e:
             self.lbl_status.setText(f"Sync error: {e}")
+
+    def _do_live_sync(self):
+        if self.chk_live.isChecked():
+            self._live_render_to_canvas()
+
+    def _on_camera_changed(self):
+        self._sync_ui()
+        self._live_sync()
+
+    def _on_interaction_ended(self):
+        self._ensure_layer_visible()
+        if self.chk_live.isChecked():
+            self.live_sync_timer.stop()
+            self._live_render_to_canvas()
+
+    def _on_viewport_fov_changed(self, fov):
+        self.sl_fov.blockSignals(True)
+        self.sl_fov.setValue(int(fov))
+        self.sl_fov.blockSignals(False)
+        self._update_fov_label(fov)
+
+    def _stamp(self, force_layer_mode=None, force_layer_name=None):
+        has_mesh = bool(self.mesh and getattr(self.mesh, 'vertices', None))
+        has_grid = bool(
+            self.chk_grid_canvas.isChecked() or
+            (hasattr(self, 'chk_grid_viewport') and self.chk_grid_viewport.isChecked())
+        )
+        if not has_mesh and not has_grid:
+            msg = "Nothing to stamp (load a 3D model or enable grid)"
+            self.lbl_status.setText(msg)
+            try:
+                view = Krita.instance().activeWindow().activeView() if Krita and Krita.instance() and Krita.instance().activeWindow() else None
+                if view and hasattr(view, 'showFloatingMessage'):
+                    view.showFloatingMessage(f"⚠️ {msg}", QIcon(), 2200, 0)
+            except Exception:
+                pass
+            return
+
+        grid_settings = self.viewport.grid_settings if (has_grid or self.chk_grid_canvas.isChecked()) else None
+        active_frame = self.frame_rect if (self.chk_use_frame.isChecked() and self.frame_rect) else None
+
+        if force_layer_mode:
+            target_mode = force_layer_mode
+        elif hasattr(self, 'combo_target_layer'):
+            target_mode = self.combo_target_layer.currentData() or "active"
+        else:
+            target_mode = "active"
+
+        target_name = force_layer_name or "3D Perspective & Model"
+
+        try:
+            stamped_name = CanvasSyncManager.render_to_krita_layer(
+                mesh=self.mesh if has_mesh else None,
+                camera=self.viewport.camera,
+                lighting=self.viewport.lighting,
+                renderer=self.viewport.renderer,
+                render_style=self.viewport.render_style,
+                layer_mode=target_mode,
+                layer_name=target_name,
+                transparent_bg=self.chk_transp.isChecked(),
+                custom_bg=self.custom_bg_color,
+                scale_factor=1.0,
+                frame=active_frame,
+                grid_settings=grid_settings,
+                draw_model=has_mesh,
+                object_transform=self.viewport.object_transform,
+                set_active=True
+            )
+            status_text = f"Stamped to '{stamped_name}'"
+            self.lbl_status.setText(status_text)
+            try:
+                view = Krita.instance().activeWindow().activeView() if Krita and Krita.instance() and Krita.instance().activeWindow() else None
+                if view and hasattr(view, 'showFloatingMessage'):
+                    view.showFloatingMessage(f"⚡ Stamped 3D scene to '{stamped_name}'", QIcon(), 1800, 0)
+            except Exception:
+                pass
+        except Exception as e:
+            err_text = f"Stamp error: {e}"
+            self.lbl_status.setText(err_text)
+            try:
+                view = Krita.instance().activeWindow().activeView() if Krita and Krita.instance() and Krita.instance().activeWindow() else None
+                if view and hasattr(view, 'showFloatingMessage'):
+                    view.showFloatingMessage(f"❌ {err_text}", QIcon(), 2800, 0)
+            except Exception:
+                pass
 
     # -----------------------------------------------------------------
     # UI Sync
@@ -3860,6 +3945,7 @@ class Krita3DLayerDocker(DockWidget):
             "quality":              ren.quality if hasattr(ren, "quality") else "Balanced",
             "debounce_ms":          self.debounce_ms,
             "live_sync":            self.chk_live.isChecked() if hasattr(self, "chk_live") else True,
+            "target_layer_mode":    self.combo_target_layer.currentData() if hasattr(self, "combo_target_layer") else "active",
             "transparent_bg":       self.chk_transp.isChecked() if hasattr(self, "chk_transp") else True,
             "custom_bg":            self.custom_bg_color.name() if (hasattr(self, "custom_bg_color") and self.custom_bg_color) else "#ffffff",
 
@@ -4393,6 +4479,14 @@ class Krita3DLayerDocker(DockWidget):
                 self.chk_live.blockSignals(True)
                 self.chk_live.setChecked(ls)
                 self.chk_live.blockSignals(False)
+
+            tlm = data.get("target_layer_mode", "active")
+            if hasattr(self, "combo_target_layer"):
+                idx = self.combo_target_layer.findData(tlm)
+                if idx >= 0:
+                    self.combo_target_layer.blockSignals(True)
+                    self.combo_target_layer.setCurrentIndex(idx)
+                    self.combo_target_layer.blockSignals(False)
 
             # 9. Collapsible Sections
             sections = [

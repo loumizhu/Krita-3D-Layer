@@ -104,7 +104,7 @@ class CanvasSyncManager:
                               transparent_bg=True, custom_bg=None,
                               scale_factor=1.0, frame=None,
                               grid_settings=None, draw_model=True,
-                              object_transform=None):
+                              object_transform=None, set_active=True):
         """
         Renders the 3D model and/or perspective grid onto a Krita paint layer.
         If frame=(fx, fy, fw, fh) is provided, limits rendering strictly within that frame.
@@ -139,17 +139,16 @@ class CanvasSyncManager:
                 object_transform=object_transform
             )
 
-            # Compose onto full document canvas so everything outside frame is clear
-            full_img = QImage(doc_w, doc_h, QImage.Format_ARGB32)
-            full_img.fill(QColor(0, 0, 0, 0))
-            painter = QPainter(full_img)
-            painter.drawImage(fx, fy, qimg)
-            painter.end()
+            if qimg.format() != QImage.Format_ARGB32:
+                qimg = qimg.convertToFormat(QImage.Format_ARGB32)
 
-            ptr = full_img.bits()
-            ptr.setsize(doc_w * doc_h * 4)
+            if render_w != fw or render_h != fh:
+                qimg = qimg.scaled(fw, fh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+            ptr = qimg.bits()
+            ptr.setsize(fw * fh * 4)
             pixel_data = bytes(ptr)
-            out_x, out_y, out_w, out_h = 0, 0, doc_w, doc_h
+            out_x, out_y, out_w, out_h = fx, fy, fw, fh
         else:
             # Full canvas render
             render_w = max(64, int(doc_w * scale_factor))
@@ -171,6 +170,10 @@ class CanvasSyncManager:
             if qimg.format() != QImage.Format_ARGB32:
                 qimg = qimg.convertToFormat(QImage.Format_ARGB32)
 
+            if render_w != doc_w or render_h != doc_h:
+                qimg = qimg.scaled(doc_w, doc_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                render_w, render_h = doc_w, doc_h
+
             ptr = qimg.bits()
             ptr.setsize(render_w * render_h * 4)
             pixel_data = bytes(ptr)
@@ -189,18 +192,43 @@ class CanvasSyncManager:
         if not target_node or layer_mode == "new":
             final_name = layer_name
             if layer_mode == "new":
-                final_name = f"{mesh.name if mesh else '3D'} Ref"
+                mesh_n = mesh.name if (mesh and hasattr(mesh, 'name') and mesh.name) else "3D"
+                final_name = f"{mesh_n} Stamp"
+            elif layer_mode == "active":
+                final_name = "3D Stamp"
             target_node = doc.createNode(final_name, "paintlayer")
-            doc.rootNode().addChildNode(target_node, None)
+
+            # Place target_node directly ABOVE active node, or at top of rootNode
+            above_node = doc.activeNode()
+            root = doc.rootNode()
+            parent = (above_node.parentNode() if (above_node and hasattr(above_node, 'parentNode') and above_node.parentNode()) else None) or root
+            try:
+                if above_node and parent:
+                    parent.addChildNode(target_node, above_node)
+                else:
+                    children = root.childNodes()
+                    top_node = children[-1] if children else None
+                    root.addChildNode(target_node, top_node)
+            except Exception:
+                root.addChildNode(target_node, None)
 
         # Unhide layer if it is hidden so user sees updates immediately
         if hasattr(target_node, "visible") and hasattr(target_node, "setVisible"):
             if not target_node.visible():
                 target_node.setVisible(True)
+        if hasattr(target_node, "opacity") and hasattr(target_node, "setOpacity"):
+            if target_node.opacity() == 0:
+                target_node.setOpacity(255)
 
         # Write pixel data to layer
         target_node.setPixelData(pixel_data, out_x, out_y, out_w, out_h)
-        doc.setActiveNode(target_node)
+        if set_active:
+            doc.setActiveNode(target_node)
         doc.refreshProjection()
+        if hasattr(doc, 'waitForDone'):
+            try:
+                doc.waitForDone()
+            except Exception:
+                pass
 
         return target_node.name()

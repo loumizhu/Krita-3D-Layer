@@ -165,7 +165,14 @@ try:
             if d.objectName() == DOCKER_ID or "3d layer" in (d.windowTitle() or "").lower():
                 existing_dock = d
                 break
-        if not existing_dock:
+        if existing_dock:
+            area = qwin.dockWidgetArea(existing_dock)
+            qwin.removeDockWidget(existing_dock)
+            existing_dock.setParent(None)
+            existing_dock.deleteLater()
+            existing_dock = Krita3DLayerDocker()
+            qwin.addDockWidget(area if area != Qt.NoDockWidgetArea else Qt.RightDockWidgetArea, existing_dock)
+        else:
             existing_dock = Krita3DLayerDocker()
             qwin.addDockWidget(Qt.RightDockWidgetArea, existing_dock)
 

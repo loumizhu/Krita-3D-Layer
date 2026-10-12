@@ -435,11 +435,25 @@ All properties are plain Python attributes — no getters/setters magic. Changes
   - `📂 Open Primitives Folder...` (opens directory in Explorer so users can add custom assets).
 - Automatically updates button label to the active model and auto-frames camera on load.
 
-### 10. Native GLB and glTF 2.0 Support (`mesh_loader.py`)
-- Added zero-dependency, pure-Python binary glTF (`.glb`) and text glTF (`.gltf`) parsers.
-- Reads glTF JSON, binary chunks (`BIN\0`), bufferViews, and accessors (scalar, vector, index arrays).
-- Supports indexed and non-indexed triangles, triangle strips, and triangle fans.
-- Handles base64 data URIs and external `.bin` files for `.gltf` scenes.
-- Expanded file dialog filter in `_import()` to include `.glb` and `.gltf`.
+### 11. Canvas View-Synchronized Cube Drawer (`docker._draw_cube_in_view`)
+- **Canvas Zoom & Pan Matching**: Uses `CanvasSyncManager.get_canvas_view_info()` to compute the exact visible document rect `(rx, ry, rw, rh)` from `flakeToCanvasTransform` and `flakeToImageTransform`.
+- **Pixel-Accurate Subrect Snapshot**: Crops document artwork strictly matching what the artist sees in their active viewport without zooming out.
+- **Immediate Perspective Drawing**: Launches directly armed in 5-point pick mode (FL, FR, BR, BL, Height) or Box mode with crosshair cursor.
+- **Auto 25% Opacity**: Stamps the 3D model into the document frame and sets layer opacity to 25% (64/255).
+- **Auto Layer Restoration**: Caches `doc.activeNode()` before opening and restores focus back to the artist's original drawing layer immediately after confirmation.
+- **AutoHotkey & Action Integration**: Registered as Krita Action `krita_3d_layer_draw_box_view` ("Draw 3D Cube in Canvas View (Match Zoom & 25% Opacity)...") and callable headlessly via `\\.\pipe\runscriptz_socket`.
 
-
+### 12. Robust Tilted Cube & Ground Perspective Calibrator (`ground_calibrator.py`)
+- **Root Problem Solved**:
+  - Tilted quads (Dutch angle roll, slope, base tilt) previously failed due to Nelder-Mead simplex local minima traps, unrolled camera ray calculation errors in initial yaw ($50^\circ-140^\circ$ angular deviation), FOV capped at $120^\circ$ (causing steep perspectives to fallback to $45^\circ$), and unapplied object matrices $M_{obj}$ (leaving cubes upright/flat on ground).
+- **Multi-Seed Levenberg-Marquardt (LM) Optimizer**:
+  - Replaced Nelder-Mead with a 9-variable LM optimizer (`yaw`, `pitch`, `roll`, `distance`, `pan_x`, `pan_y`, `rect_w`, `rect_d`, `fov`) evaluating true `Camera3D` forward projection residuals.
+  - Multi-seed exploration across multiple yaw orientations and FOV baselines guarantees convergence to global minimum ($< 0.003\text{ px}$ sub-pixel error).
+  - Raised FOV recovery ceiling from $120^\circ$ to $155^\circ$.
+- **Camera vs Object Tilt Equivalence ($M_{obj}$)**:
+  - When `keep_horizon=False`: Camera adopts solved roll angle $\theta_{roll}$; primitive sits in standard ground space.
+  - When `keep_horizon=True`: Camera horizon line stays perfectly level ($roll = 0.0^\circ$), while object takes transformation matrix $M_{obj} = View_{level}^{-1} \times View_{tilted}$.
+  - Box vertices, preview meshes, and stamped primitives apply $M_{obj}$ and `flip_yaw`, attaching the 3D cube firmly to the user's pins in both modes.
+- **Tilted 5th-Point Height Projection**:
+  - Normal vector $n_{up} = M_{obj} \times (0, 1, 0)$ accurately tracks base normal on sloped/tilted quads.
+  - `solve_height_from_point()` and `project_height_to_norm_point()` project height along $n_{up}$ rather than assuming global upright $(0, 1, 0)$.

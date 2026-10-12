@@ -21,6 +21,14 @@ from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRect, QSize
 # =====================================================================
 ACTION_CATALOG = {
     # Primitives & Drawing
+    "draw_cube_view": {
+        "name": "Draw Cube in View (25% Opacity)",
+        "icon": "🎯",
+        "label": "Cube in View",
+        "tooltip": "Draw 3D cube matching active canvas zoom & pan, stamps at 25% opacity and returns to your layer",
+        "color": "#047857",
+        "text_color": "#d1fae5",
+    },
     "draw_box": {
         "name": "Draw Box Primitive",
         "icon": "✏️",
@@ -689,7 +697,12 @@ class QuickActionsToolbar(QWidget):
         if not d:
             return
 
-        if action_id == "draw_box":
+        if action_id in ("draw_cube_view", "draw_box_view"):
+            if hasattr(d, '_draw_cube_in_view'):
+                d._draw_cube_in_view(opacity=0.25)
+            else:
+                d._open_primitive_drawer(start_click_draw=True)
+        elif action_id == "draw_box":
             d._open_primitive_drawer(start_click_draw=True)
         elif action_id in ("ground_rect", "draw_ground_rect", "drawRectangleGround"):
             d._open_ground_calibrator()

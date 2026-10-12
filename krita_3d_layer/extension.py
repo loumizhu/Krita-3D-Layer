@@ -60,6 +60,13 @@ class Krita3DLayerExtension(Extension):
         )
         draw_action.triggered.connect(self.draw_box)
 
+        draw_view_action = window.createAction(
+            "krita_3d_layer_draw_box_view",
+            "Draw 3D Cube in Canvas View (Match Zoom & 25% Opacity)...",
+            "tools/scripts"
+        )
+        draw_view_action.triggered.connect(self.draw_box_in_view)
+
         ground_action = window.createAction(
             "krita_3d_layer_ground_calibrator",
             "3D Ground Rectangle Calibrator...",
@@ -102,6 +109,22 @@ class Krita3DLayerExtension(Extension):
         self.show_dialog()
         if self.dialog and hasattr(self.dialog, 'docker_widget'):
             self.dialog.docker_widget._open_primitive_drawer(start_click_draw=True)
+
+    def draw_box_in_view(self):
+        """Shows 3D layer docker and launches Box Drawer calibrated to canvas pan & zoom with auto 25% opacity."""
+        app = Krita.instance() if Krita else None
+        if app:
+            for d in app.dockers():
+                if d.objectName() == "krita_3d_layer_docker" or "3d layer" in d.windowTitle().lower():
+                    d.setVisible(True)
+                    d.raise_()
+                    if hasattr(d, '_draw_cube_in_view'):
+                        d._draw_cube_in_view(opacity=0.25)
+                        return
+        self.show_dialog()
+        if self.dialog and hasattr(self.dialog, 'docker_widget'):
+            if hasattr(self.dialog.docker_widget, '_draw_cube_in_view'):
+                self.dialog.docker_widget._draw_cube_in_view(opacity=0.25)
 
     def show_dialog(self):
         if not self.dialog:

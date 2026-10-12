@@ -3089,6 +3089,9 @@ class Krita3DLayerDocker(DockWidget):
 
         snapshot = CanvasSyncManager.get_canvas_snapshot()
         active_frame = self.frame_rect if (self.chk_use_frame.isChecked() and self.frame_rect) else None
+        app = Krita.instance() if Krita else None
+        win = app.activeWindow() if app else None
+        parent_widget = win.qwindow() if win and hasattr(win, 'qwindow') else None
         dlg = GroundCalibratorDialog(
             bg_image=snapshot,
             mesh=self.mesh,
@@ -3098,7 +3101,7 @@ class Krita3DLayerDocker(DockWidget):
             frame_rect=active_frame,
             start_in_click_draw=(initial_mode in ("draw", "drag")),
             initial_mode=initial_mode,
-            parent=self
+            parent=parent_widget
         )
         if initial_mode == 4:
             if hasattr(dlg, '_start_4point_pick'):
@@ -3201,9 +3204,162 @@ class Krita3DLayerDocker(DockWidget):
     # -----------------------------------------------------------------
     # Unified Primitive Drawer / Ground Calibrator Dialog
     # -----------------------------------------------------------------
+    def _draw_cube_in_view(self, opacity=0.25, primitive_type="Box", initial_mode=5):
+        """
+        Immediately opens the 3D Box / Primitive Drawer calibrated strictly to what the
+        artist currently sees on the canvas (mimicking canvas pan & zoom).
+        Upon confirming the cube:
+          1. Generates 3D box and sets perspective camera matching the drawn cube.
+          2. Stamped directly onto Krita's 3D layer at the exact document location.
+          3. Sets the 3D layer opacity to 25% (or specified opacity).
+          4. Restores active layer back to the layer the artist was working on.
+        """
+        doc = CanvasSyncManager.get_active_document()
+        if not doc:
+            app = Krita.instance() if Krita else None
+            win = app.activeWindow() if app else None
+            if win and win.activeView():
+                win.activeView().showFloatingMessage(
+                    "⚠️ Please open or create a canvas before drawing 3D boxes.",
+                    QIcon(), 3000, 1
+                )
+            return
+        orig_node = doc.activeNode()
+
+        # Ensure docker is visible in Krita's dock manager
+        try:
+            t_act = self.toggleViewAction() if hasattr(self, 'toggleViewAction') else None
+            if t_act and not self.isVisible():
+                t_act.setChecked(True)
+                t_act.trigger()
+            self.show()
+            self.raise_()
+        except Exception:
+            pass
+
+        view_info = CanvasSyncManager.get_canvas_view_info()
+        bg_image = view_info.get("snapshot") or CanvasSyncManager.get_canvas_snapshot()
+        active_frame = view_info.get("rect")
+        # In the dialog, the bg_image dimensions are (fw, fh) matching the view
+        dialog_frame = (0, 0, active_frame[2], active_frame[3]) if active_frame else None
+
+        app = Krita.instance() if Krita else None
+        win = app.activeWindow() if app else None
+        parent_widget = win.qwindow() if win and hasattr(win, 'qwindow') else None
+
+        dlg = GroundCalibratorDialog(
+            bg_image=bg_image,
+            mesh=self.mesh,
+            camera=self.viewport.camera,
+            lighting=self.viewport.lighting,
+            renderer=self.viewport.renderer,
+            frame_rect=dialog_frame,
+            start_in_click_draw=False,
+            initial_mode=initial_mode,
+            parent=parent_widget
+        )
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+        def on_applied(sol):
+            # 1. Set generated 3D primitive mesh
+            if "mesh" in sol and sol["mesh"]:
+                self._reset_obj_all()
+                self.mesh = sol["mesh"]
+                self.mesh_path = None
+                ptype = sol.get("primitive_type", primitive_type)
+                self.mesh.primitive_type = ptype
+                if ptype == "Box":
+                    self.mesh.primitive_params = {"w": sol.get("box_w", 2.0), "h": sol.get("box_h", 2.0), "d": sol.get("box_d", 2.0)}
+                self.viewport.set_mesh(self.mesh)
+                self._sync_primitive_ui()
+                self.lbl_model.setText(f"Drawn Primitive: {ptype} ({self.mesh.vertex_count} vertices, {self.mesh.face_count} faces)")
+
+            # 2. Camera parameters
+            c = self.viewport.camera
+            c.projection_mode = ProjectionMode.PERSPECTIVE
+            c.orthographic = False
+            if hasattr(self, 'combo_proj'):
+                self.combo_proj.blockSignals(True)
+                self.combo_proj.setCurrentText(ProjectionMode.PERSPECTIVE)
+                self.combo_proj.blockSignals(False)
+            self._update_proj_controls_visibility(ProjectionMode.PERSPECTIVE)
+
+            c.yaw = float(sol.get("yaw", c.yaw)) % 360.0
+            c.pitch = max(-85.0, min(85.0, float(sol.get("pitch", c.pitch))))
+            c.roll = float(sol.get("roll", 0.0))
+            c.tilt = 0.0
+            c.fov = float(sol.get("fov", c.fov))
+            c.distance = float(sol.get("distance", c.distance))
+            c.pan_x = float(sol.get("pan_x", 0.0))
+            c.pan_y = float(sol.get("pan_y", 0.0))
+            if "target_x" in sol:
+                c.target_x = float(sol["target_x"])
+                c.target_y = float(sol["target_y"])
+                c.target_z = float(sol["target_z"])
+
+            # Lock scene frame to the canvas view frame
+            if active_frame:
+                fx, fy, fw, fh = active_frame
+                self.frame_rect = (fx, fy, fw, fh)
+                self.chk_use_frame.setChecked(True)
+                self.viewport.set_scene_frame(self.frame_rect, f"{fw}x{fh}")
+                self.spin_fx.blockSignals(True); self.spin_fx.setValue(fx); self.spin_fx.blockSignals(False)
+                self.spin_fy.blockSignals(True); self.spin_fy.setValue(fy); self.spin_fy.blockSignals(False)
+                self.spin_fw.blockSignals(True); self.spin_fw.setValue(fw); self.spin_fw.blockSignals(False)
+                self.spin_fh.blockSignals(True); self.spin_fh.setValue(fh); self.spin_fh.blockSignals(False)
+
+            self._sync_ui()
+            self._sync_target_spins()
+            self.viewport.update()
+
+            # 3. Stamp to Krita with target opacity and restore original active layer
+            target_name = "3D Perspective & Model"
+            target_mode = self.combo_target_layer.currentData() if hasattr(self, 'combo_target_layer') else "named"
+            if not target_mode:
+                target_mode = "named"
+
+            CanvasSyncManager.render_to_krita_layer(
+                mesh=self.mesh,
+                camera=self.viewport.camera,
+                lighting=self.viewport.lighting,
+                renderer=self.viewport.renderer,
+                render_style=self.viewport.render_style,
+                layer_mode=target_mode,
+                layer_name=target_name,
+                transparent_bg=self.chk_transp.isChecked(),
+                custom_bg=self.custom_bg_color,
+                scale_factor=1.0,
+                frame=active_frame,
+                grid_settings=self.viewport.grid_settings if self.chk_grid_canvas.isChecked() else None,
+                draw_model=True,
+                object_transform=self.viewport.object_transform,
+                set_active=False,
+                opacity=opacity,
+                restore_node=orig_node
+            )
+
+            ptype = sol.get("primitive_type", "Box")
+            op_pct = int(opacity * 100) if opacity <= 1.0 else int(opacity / 255 * 100)
+            self.lbl_status.setText(f"3D {ptype} placed in canvas view! (Layer opacity: {op_pct}%, original layer restored)")
+            try:
+                view = Krita.instance().activeWindow().activeView() if Krita and Krita.instance() and Krita.instance().activeWindow() else None
+                if view and hasattr(view, 'showFloatingMessage'):
+                    view.showFloatingMessage(f"⚡ 3D {ptype} placed in canvas view ({op_pct}% opacity)", QIcon(), 2000, 0)
+            except Exception:
+                pass
+            self._save_session()
+
+        dlg.applied.connect(on_applied)
+        dlg.exec_()
+
     def _open_primitive_drawer(self, start_click_draw=False):
         snapshot = CanvasSyncManager.get_canvas_snapshot()
         active_frame = self.frame_rect if (self.chk_use_frame.isChecked() and self.frame_rect) else None
+        app = Krita.instance() if Krita else None
+        win = app.activeWindow() if app else None
+        parent_widget = win.qwindow() if win and hasattr(win, 'qwindow') else None
         dlg = GroundCalibratorDialog(
             bg_image=snapshot,
             mesh=self.mesh,
@@ -3212,8 +3368,11 @@ class Krita3DLayerDocker(DockWidget):
             renderer=self.viewport.renderer,
             frame_rect=active_frame,
             start_in_click_draw=start_click_draw,
-            parent=self
+            parent=parent_widget
         )
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         dlg.applied.connect(self._on_ground_calibrator_applied)
         dlg.exec_()
 

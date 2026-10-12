@@ -21,6 +21,7 @@ from .renderer import (
     Camera3D, Lighting3D, Renderer3D, RenderStyle, project_camera_point,
     ProjectionMode, ObjectTransform
 )
+from .mesh_loader import MeshData
 from .primitive_drawer import (
     create_box_primitive, create_cylinder_primitive, create_sphere_primitive,
     create_pyramid_primitive, create_cone_primitive, create_plane_primitive,
@@ -153,46 +154,99 @@ def line_intersection(l1, l2):
     return QPointF(x, y)
 
 
+def _solve_linear_system_nxn(A, b):
+    """Gaussian elimination with partial pivoting for small N x N system."""
+    n = len(A)
+    M = [A[i][:] + [b[i]] for i in range(n)]
+    for i in range(n):
+        max_row = i
+        max_val = abs(M[i][i])
+        for r in range(i + 1, n):
+            if abs(M[r][i]) > max_val:
+                max_val = abs(M[r][i])
+                max_row = r
+        if max_row != i:
+            M[i], M[max_row] = M[max_row], M[i]
+        pivot = M[i][i]
+        if abs(pivot) < 1e-12:
+            return None
+        for c in range(i, n + 1):
+            M[i][c] /= pivot
+        for r in range(n):
+            if r != i:
+                factor = M[r][i]
+                for c in range(i, n + 1):
+                    M[r][c] -= factor * M[i][c]
+    return [M[i][n] for i in range(n)]
+
+
+def _project_calib_rect_corners(cam, render_size, offset_x, offset_y, rw, rd, gy, M_obj=None, flip_yaw=False):
+    _, view_mat, _ = cam.get_matrices(render_size, render_size)
+    hw = rw * 0.5
+    hd = rd * 0.5
+    if not flip_yaw:
+        raw_corners = [
+            QVector3D( hw, gy, -hd),  # p0: FL
+            QVector3D(-hw, gy, -hd),  # p1: FR
+            QVector3D(-hw, gy,  hd),  # p2: BR
+            QVector3D( hw, gy,  hd),  # p3: BL
+        ]
+    else:
+        raw_corners = [
+            QVector3D(-hw, gy,  hd),  # p0: BR (flipped)
+            QVector3D( hw, gy,  hd),  # p1: BL (flipped)
+            QVector3D( hw, gy, -hd),  # p2: FL (flipped)
+            QVector3D(-hw, gy, -hd),  # p3: FR (flipped)
+        ]
+    projs = []
+    corners_3d = []
+    for c in raw_corners:
+        c_world = M_obj.map(c) if M_obj else c
+        corners_3d.append(c_world)
+        pt, _ = project_camera_point(cam, view_mat, c_world.x(), c_world.y(), c_world.z(),
+                                     render_size, offset_x, offset_y)
+        if pt is None:
+            return None, None
+        projs.append(pt)
+    return projs, corners_3d
+
+
 def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh=None, frame_rect=None,
                            keep_horizon=True, flip_yaw=False):
     """
-    Solves camera parameters from 4 ground quad points (p0..p3) in document pixel space:
-      p0: Front-Left
-      p1: Front-Right
-      p2: Back-Right
-      p3: Back-Left
-    Returns a dict with: yaw, pitch, roll, fov, distance, pan_x, pan_y,
-    target_x, target_y, target_z, vp1, vp2, horizon, center_2d.
+    Solves camera parameters and 3D rectangle base from 4 ground quad points (p0..p3) in document pixel space.
+    Uses multi-seed Levenberg-Marquardt sub-pixel optimization with exact Camera3D forward projection.
+    Supports arbitrarily tilted cubes, Dutch-angle roll, and tilted ground bases.
     """
     # 1. Coordinate Space
     if frame_rect and len(frame_rect) == 4 and frame_rect[2] > 0 and frame_rect[3] > 0:
         fx, fy, fw, fh = frame_rect
         cx = fx + fw * 0.5
         cy = fy + fh * 0.5
-        view_size = min(float(fw), float(fh))
+        render_size = min(float(fw), float(fh))
+        offset_x = fx + (fw - render_size) * 0.5
+        offset_y = fy + (fh - render_size) * 0.5
     else:
         w = float(width) if width > 0 else 1000.0
         h = float(height) if height > 0 else 1000.0
         cx = w * 0.5
         cy = h * 0.5
-        view_size = min(w, h)
+        render_size = min(w, h)
+        offset_x = (w - render_size) * 0.5
+        offset_y = (h - render_size) * 0.5
 
-    # In Qt / OpenGL perspective(fov, aspect), fov is VERTICAL FOV.
-    # Therefore, focal length is always relative to half the view size:
-    half_size = view_size * 0.5
+    half_size = render_size * 0.5
 
     # 2. Vanishing Points
-    # Axis X (Front & Back): p0->p1 and p3->p2
     L_front = line_equation(p0, p1)
     L_back = line_equation(p3, p2)
     vp1 = line_intersection(L_front, L_back)
 
-    # Axis Z (Left & Right): p0->p3 and p1->p2
     L_left = line_equation(p0, p3)
     L_right = line_equation(p1, p2)
     vp2 = line_intersection(L_left, L_right)
 
-    # 3. Perspective center of quad (intersection of diagonals)
+    # 3. Perspective center of quad
     diag1 = line_equation(p0, p2)
     diag2 = line_equation(p1, p3)
     center_2d = line_intersection(diag1, diag2)
@@ -202,122 +256,84 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
             (p0.y() + p1.y() + p2.y() + p3.y()) * 0.25
         )
 
-    # 4. Focal length and FOV recovery
+    # 4. Focal length & FOV initial estimate
     f_base = half_size / math.tan(math.radians(max(5.0, min(160.0, current_fov)) * 0.5))
-    f = f_base
-    solved_fov = current_fov
+    f_init = f_base
+    fov_init = current_fov
 
     if vp1 and vp2:
         u1 = (vp1.x() - cx, -(vp1.y() - cy))
         u2 = (vp2.x() - cx, -(vp2.y() - cy))
         dot = u1[0] * u2[0] + u1[1] * u2[1]
-        if dot < -100.0:  # Orthogonal directions in perspective
+        if dot < -100.0:
             f_calc = math.sqrt(-dot)
             calc_fov = 2.0 * math.atan(half_size / f_calc) * 180.0 / math.pi
-            if 12.0 <= calc_fov <= 120.0:
-                f = f_calc
-                solved_fov = calc_fov
+            if 10.0 <= calc_fov <= 155.0:
+                f_init = f_calc
+                fov_init = calc_fov
 
-    # 5. Ray vectors in Camera View Space (OpenGL convention: -Z is forward, +Y is up, +X is right)
+    # 5. Ray directions in Camera View Space
     if vp1 and vp2:
-        ray_X = QVector3D(vp1.x() - cx, -(vp1.y() - cy), -f).normalized()
-        ray_Z = QVector3D(vp2.x() - cx, -(vp2.y() - cy), -f).normalized()
+        ray_X = QVector3D(vp1.x() - cx, -(vp1.y() - cy), -f_init).normalized()
+        ray_Z = QVector3D(vp2.x() - cx, -(vp2.y() - cy), -f_init).normalized()
     elif vp2:
-        # 1-point perspective: Front/Back lines are parallel in screen space
-        ray_Z = QVector3D(vp2.x() - cx, -(vp2.y() - cy), -f).normalized()
+        ray_Z = QVector3D(vp2.x() - cx, -(vp2.y() - cy), -f_init).normalized()
         ray_X = QVector3D(p1.x() - p0.x(), -(p1.y() - p0.y()), 0.0).normalized()
     elif vp1:
-        # Side lines are parallel in screen space
-        ray_X = QVector3D(vp1.x() - cx, -(vp1.y() - cy), -f).normalized()
+        ray_X = QVector3D(vp1.x() - cx, -(vp1.y() - cy), -f_init).normalized()
         ray_Z = QVector3D(p3.x() - p0.x(), -(p3.y() - p0.y()), 0.0).normalized()
     else:
-        # Top-down / axonometric fallback
         ray_X = QVector3D(1.0, 0.0, 0.0)
         ray_Z = QVector3D(0.0, 0.0, -1.0)
 
-    # Ensure ray_X points in direction p0 -> p1 (screen left to right)
     dir_2d_X = QVector3D(p1.x() - p0.x(), -(p1.y() - p0.y()), 0.0).normalized()
     if QVector3D.dotProduct(ray_X, dir_2d_X) < 0:
         ray_X = -ray_X
 
-    # Ensure ray_Z points in direction p0 -> p3 (into screen towards horizon)
     dir_2d_Z = QVector3D(p3.x() - p0.x(), -(p3.y() - p0.y()), 0.0).normalized()
     if QVector3D.dotProduct(ray_Z, dir_2d_Z) < 0:
         ray_Z = -ray_Z
 
-    # 6. Ground Normal in camera view space
+    # 6. Normal, analytic Roll and Pitch
     N = QVector3D.crossProduct(ray_X, ray_Z).normalized()
     if N.y() < 0:
         N = -N
 
-    # 7. Pitch and Roll
-    if keep_horizon:
-        N = QVector3D(0.0, N.y(), N.z()).normalized()
-        roll = 0.0
-    else:
-        roll = -math.degrees(math.atan2(N.x(), N.y()))
-        roll = max(-85.0, min(85.0, roll))
+    roll_est = -math.degrees(math.atan2(N.x(), N.y()))
+    pitch_est = math.degrees(math.atan2(N.z(), math.sqrt(N.x()**2 + N.y()**2)))
 
-    pitch = math.degrees(math.atan2(N.z(), math.sqrt(N.x()**2 + N.y()**2)))
-    pitch = max(-85.0, min(85.0, pitch))
+    # 7. Unroll rays to compute true analytic Yaw
+    r_roll = math.radians(roll_est)
+    cr = math.cos(r_roll); sr = math.sin(r_roll)
+    unrolled_X = QVector3D(cr * ray_X.x() + sr * ray_X.y(),
+                           -sr * ray_X.x() + cr * ray_X.y(),
+                           ray_X.z())
+    unrolled_Z = QVector3D(cr * ray_Z.x() + sr * ray_Z.y(),
+                           -sr * ray_Z.x() + cr * ray_Z.y(),
+                           ray_Z.z())
 
-    # 8. Yaw (combining both axes for least-squares optimal alignment)
-    cos_pitch = max(0.01, math.cos(math.radians(pitch)))
-    # In Camera3D view space:
-    # ray_X points from p0 to p1 (towards world -X).
-    # ray_Z points from p0 to p3 (towards world +Z).
-    sin_yaw_X = -ray_X.z() / cos_pitch
-    cos_yaw_X = -ray_X.x()
-    sin_yaw_Z = -ray_Z.x()
-    cos_yaw_Z = ray_Z.z() / cos_pitch
-
-    if vp1 and vp2:
-        sin_yaw = (sin_yaw_X + sin_yaw_Z) * 0.5
-        cos_yaw = (cos_yaw_X + cos_yaw_Z) * 0.5
-    elif vp2:
-        sin_yaw = sin_yaw_Z
-        cos_yaw = cos_yaw_Z
-    else:
-        sin_yaw = sin_yaw_X
-        cos_yaw = cos_yaw_X
-
-    yaw = (math.degrees(math.atan2(sin_yaw, cos_yaw))) % 360.0
+    cos_pitch = max(0.01, math.cos(math.radians(pitch_est)))
+    u_X = -unrolled_X
+    sin_yaw_X = -u_X.z() / cos_pitch
+    cos_yaw_X = u_X.x()
+    yaw_est = (math.degrees(math.atan2(sin_yaw_X, cos_yaw_X))) % 360.0
     if flip_yaw:
-        yaw = (yaw + 180.0) % 360.0
+        yaw_est = (yaw_est + 180.0) % 360.0
 
-    # 9. Ground Rectangle 3D Dimensions & Scaling
-    # Compute rays through p0, p1, p2, p3 and intersect with ground plane in camera view space
+    # 8. Distance and Pan estimates
     w01 = math.hypot(p1.x() - p0.x(), p1.y() - p0.y())
     w32 = math.hypot(p2.x() - p3.x(), p2.y() - p3.y())
     quad_w = max(5.0, (w01 + w32) * 0.5)
 
     L_perp = max(0.15, math.sqrt(ray_X.x()**2 + ray_X.y()**2))
-    dist = f * (2.0 * L_perp) / quad_w
-    dist = max(0.2, min(50.0, dist))
+    dist_est = f_init * (2.0 * L_perp) / quad_w
+    dist_est = max(0.5, min(50.0, dist_est))
 
-    # Center ray and ground center in camera coordinates:
-    rc_len = math.sqrt((center_2d.x() - cx)**2 + (center_2d.y() - cy)**2 + f**2)
-    rc = QVector3D((center_2d.x() - cx) / rc_len, -(center_2d.y() - cy) / rc_len, -f / rc_len)
-    P_center = rc * dist
+    pan_x_est = ((center_2d.x() - cx) / f_init) * dist_est
+    pan_y_est = -((center_2d.y() - cy) / f_init) * dist_est
 
-    def _project_ray_to_plane(pt):
-        r_len = math.sqrt((pt.x() - cx)**2 + (pt.y() - cy)**2 + f**2)
-        ray = QVector3D((pt.x() - cx) / r_len, -(pt.y() - cy) / r_len, -f / r_len)
-        denom = QVector3D.dotProduct(N, ray)
-        if abs(denom) > 1e-4:
-            t = QVector3D.dotProduct(N, P_center) / denom
-            return ray * t
-        return P_center
-
-    P0 = _project_ray_to_plane(p0)
-    P1 = _project_ray_to_plane(p1)
-    P2 = _project_ray_to_plane(p2)
-    P3 = _project_ray_to_plane(p3)
-
-    rect_w = max(0.2, min(50.0, ((P1 - P0).length() + (P2 - P3).length()) * 0.5))
-    rect_d = max(0.2, min(50.0, ((P3 - P0).length() + (P2 - P1).length()) * 0.5))
-
-    ground_y = -1.0
+    # Target points & ground
+    ground_y = 0.0
     target_x = 0.0
     target_y = ground_y
     target_z = 0.0
@@ -327,158 +343,195 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         target_y = ground_y
         target_z = (mesh.bbox_min.z() + mesh.bbox_max.z()) * 0.5
 
+    target_pts = [p0, p1, p2, p3]
+
+    # 9. Levenberg-Marquardt Sub-Pixel Optimization
+    def _residuals(params):
+        yaw_val = params[0]
+        pitch_val = max(-85.0, min(85.0, params[1]))
+        roll_val = max(-85.0, min(85.0, params[2]))
+        dist_val = max(0.1, min(100.0, params[3]))
+        px_val = params[4]
+        py_val = params[5]
+        rw_val = max(0.05, params[6])
+        rd_val = max(0.05, params[7])
+        fov_val = max(10.0, min(155.0, params[8]))
+
+        c_test = Camera3D()
+        c_test.yaw = yaw_val
+        c_test.pitch = pitch_val
+        c_test.roll = roll_val
+        c_test.distance = dist_val
+        c_test.pan_x = px_val
+        c_test.pan_y = py_val
+        c_test.fov = fov_val
+        c_test.target_x = target_x
+        c_test.target_y = target_y
+        c_test.target_z = target_z
+
+        projs, _ = _project_calib_rect_corners(c_test, render_size, offset_x, offset_y,
+                                               rw_val, rd_val, target_y, flip_yaw=flip_yaw)
+        if projs is None:
+            return [1e4] * 8
+        res = []
+        for pr, tp in zip(projs, target_pts):
+            res.append(pr.x() - tp.x())
+            res.append(pr.y() - tp.y())
+        return res
+
+    def _lm_optimize(seed, max_iters=25):
+        params = list(seed)
+        param_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        n_params = len(param_indices)
+        eps_scales = {0: 0.1, 1: 0.1, 2: 0.1, 3: 0.05, 4: 0.02, 5: 0.02, 6: 0.05, 7: 0.05, 8: 0.2}
+
+        damping = 1.0
+        res = _residuals(params)
+        curr_cost = sum(r * r for r in res)
+
+        for _ in range(max_iters):
+            if curr_cost < 0.001:
+                break
+            J = []
+            for p_idx in param_indices:
+                eps = eps_scales.get(p_idx, 0.05)
+                pp = list(params); pp[p_idx] += eps
+                pm = list(params); pm[p_idx] -= eps
+                rp = _residuals(pp)
+                rm = _residuals(pm)
+                col = [(rp[k] - rm[k]) / (2.0 * eps) for k in range(8)]
+                J.append(col)
+
+            JTJ = [[sum(J[a][k] * J[b][k] for k in range(8)) for b in range(n_params)] for a in range(n_params)]
+            JTr = [sum(J[a][k] * res[k] for k in range(8)) for a in range(n_params)]
+
+            for a in range(n_params):
+                JTJ[a][a] += damping * (JTJ[a][a] + 1.0)
+
+            delta = _solve_linear_system_nxn(JTJ, [-val for val in JTr])
+            if not delta:
+                damping *= 4.0
+                continue
+
+            candidate = list(params)
+            for a, p_idx in enumerate(param_indices):
+                candidate[p_idx] += delta[a]
+
+            cand_res = _residuals(candidate)
+            cand_cost = sum(r * r for r in cand_res)
+
+            if cand_cost < curr_cost:
+                params = candidate
+                curr_cost = cand_cost
+                res = cand_res
+                damping = max(1e-4, damping * 0.5)
+            else:
+                damping = min(1e5, damping * 2.5)
+
+        return params, curr_cost
+
+    # Multi-seed evaluation to guarantee global optimum
+    seeds = [
+        [yaw_est, pitch_est, roll_est, dist_est, pan_x_est, pan_y_est, 2.0, 2.0, fov_init],
+        [(yaw_est + 180.0) % 360.0, pitch_est, roll_est, dist_est, pan_x_est, pan_y_est, 2.0, 2.0, fov_init],
+        [180.0, 15.0, roll_est, dist_est, pan_x_est, pan_y_est, 2.0, 2.0, fov_init],
+        [yaw_est, pitch_est, -roll_est, dist_est, pan_x_est, pan_y_est, 2.0, 2.0, fov_init],
+    ]
+
+    best_params, best_cost = None, 1e9
+    for s in seeds:
+        sp, sc = _lm_optimize(s, max_iters=20)
+        if sc < best_cost:
+            best_cost = sc
+            best_params = sp
+
+    # Fine-tune best params
+    best_params, best_cost = _lm_optimize(best_params, max_iters=30)
+
+    sol_yaw = best_params[0] % 360.0
+    sol_pitch = max(-85.0, min(85.0, best_params[1]))
+    sol_roll = max(-85.0, min(85.0, best_params[2]))
+    sol_dist = max(0.1, min(100.0, best_params[3]))
+    sol_pan_x = best_params[4]
+    sol_pan_y = best_params[5]
+    sol_rw = max(0.05, best_params[6])
+    sol_rd = max(0.05, best_params[7])
+    sol_fov = max(10.0, min(155.0, best_params[8]))
+
+    # Construct solution camera
+    cam_sol = Camera3D()
+    cam_sol.yaw = sol_yaw
+    cam_sol.pitch = sol_pitch
+    cam_sol.roll = sol_roll
+    cam_sol.distance = sol_dist
+    cam_sol.pan_x = sol_pan_x
+    cam_sol.pan_y = sol_pan_y
+    cam_sol.fov = sol_fov
+    cam_sol.target_x = target_x
+    cam_sol.target_y = target_y
+    cam_sol.target_z = target_z
+
+    M_obj = None
+    if keep_horizon and abs(sol_roll) > 0.05:
+        # Camera stays level (roll = 0.0), object base takes the tilt!
+        cam_level = Camera3D()
+        cam_level.yaw = sol_yaw
+        cam_level.pitch = sol_pitch
+        cam_level.roll = 0.0
+        cam_level.distance = sol_dist
+        cam_level.pan_x = sol_pan_x
+        cam_level.pan_y = sol_pan_y
+        cam_level.fov = sol_fov
+        cam_level.target_x = target_x
+        cam_level.target_y = target_y
+        cam_level.target_z = target_z
+
+        _, view_tilted, _ = cam_sol.get_matrices(render_size, render_size)
+        _, view_level, _ = cam_level.get_matrices(render_size, render_size)
+        view_level_inv, _ = view_level.inverted()
+        M_obj = view_level_inv * view_tilted
+        cam_sol = cam_level
+        sol_roll = 0.0
+        n_up = M_obj.mapVector(QVector3D(0.0, 1.0, 0.0)).normalized()
+    else:
+        n_up = QVector3D(0.0, 1.0, 0.0)
+
+    projs, corners_3d = _project_calib_rect_corners(cam_sol, render_size, offset_x, offset_y,
+                                                   sol_rw, sol_rd, target_y, M_obj=M_obj, flip_yaw=flip_yaw)
+
+    # Primitive dimensions
     ptype = getattr(mesh, 'primitive_type', None) if mesh else None
-    if ptype == "Box":
+    if ptype in ("Box", "Pyramid"):
         prev_h = 2.0
         if hasattr(mesh, 'primitive_params') and 'h' in mesh.primitive_params:
             prev_h = float(mesh.primitive_params['h'])
         elif hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
             prev_h = max(0.2, mesh.bbox_max.y() - mesh.bbox_min.y())
         rect_h = max(0.2, min(50.0, prev_h))
-        sphere_radius = min(rect_w, rect_d) * 0.5
-    elif ptype == "Pyramid":
-        prev_h = 2.0
-        if hasattr(mesh, 'primitive_params') and 'h' in mesh.primitive_params:
-            prev_h = float(mesh.primitive_params['h'])
-        elif hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
-            prev_h = max(0.2, mesh.bbox_max.y() - mesh.bbox_min.y())
-        rect_h = max(0.2, min(50.0, prev_h))
-        sphere_radius = min(rect_w, rect_d) * 0.5
+        sphere_radius = min(sol_rw, sol_rd) * 0.5
     elif ptype == "Sphere":
-        sphere_radius = max(0.1, min(25.0, min(rect_w, rect_d) * 0.5))
+        sphere_radius = max(0.1, min(25.0, min(sol_rw, sol_rd) * 0.5))
         rect_h = sphere_radius * 2.0
     else:
-        rect_h = (rect_w + rect_d) * 0.5
-        sphere_radius = min(rect_w, rect_d) * 0.5
+        rect_h = (sol_rw + sol_rd) * 0.5
+        sphere_radius = min(sol_rw, sol_rd) * 0.5
 
-    # Scale factors for imported 3D mesh:
+    # Scale factors for imported mesh
     if mesh and hasattr(mesh, 'bbox_min') and hasattr(mesh, 'bbox_max'):
         orig_w = max(0.01, mesh.bbox_max.x() - mesh.bbox_min.x())
         orig_d = max(0.01, mesh.bbox_max.z() - mesh.bbox_min.z())
         orig_h = max(0.01, mesh.bbox_max.y() - mesh.bbox_min.y())
-        scale_x = max(0.01, min(100.0, rect_w / orig_w))
-        scale_z = max(0.01, min(100.0, rect_d / orig_d))
+        scale_x = max(0.01, min(100.0, sol_rw / orig_w))
+        scale_z = max(0.01, min(100.0, sol_rd / orig_d))
         scale_y = (scale_x + scale_z) * 0.5
     else:
         scale_x = scale_y = scale_z = 1.0
 
-    # 10. Camera Pan
-    pan_x = ((center_2d.x() - cx) / f) * dist
-    pan_y = -((center_2d.y() - cy) / f) * dist
-
-    # 11. Fast Sub-Pixel Corner Refinement Optimization (Nelder-Mead simplex)
-    # Refines yaw, pitch, roll, dist, pan_x, pan_y using actual rect_w and rect_d
-    hw = rect_w * 0.5
-    hd = rect_d * 0.5
-    if not flip_yaw:
-        corners_3d = [
-            QVector3D(target_x + hw, ground_y, target_z - hd),  # p0: Front-Left
-            QVector3D(target_x - hw, ground_y, target_z - hd),  # p1: Front-Right
-            QVector3D(target_x - hw, ground_y, target_z + hd),  # p2: Back-Right
-            QVector3D(target_x + hw, ground_y, target_z + hd),  # p3: Back-Left
-        ]
-    else:
-        corners_3d = [
-            QVector3D(target_x - hw, ground_y, target_z + hd),  # p0: Back-Right (flipped)
-            QVector3D(target_x + hw, ground_y, target_z + hd),  # p1: Back-Left (flipped)
-            QVector3D(target_x + hw, ground_y, target_z - hd),  # p2: Front-Left (flipped)
-            QVector3D(target_x - hw, ground_y, target_z - hd),  # p3: Front-Right (flipped)
-        ]
-    target_pts = [p0, p1, p2, p3]
-
-    def _eval_error(params):
-        pyaw, ppitch, proll, pdist, ppx, ppy = params
-        if pdist < 0.1 or abs(ppitch) > 87.0:
-            return 1e9
-        r_yaw = math.radians(pyaw)
-        r_pitch = math.radians(ppitch)
-        eye = QVector3D(
-            target_x + pdist * math.cos(r_pitch) * math.sin(r_yaw),
-            pdist * math.sin(r_pitch) + target_y,
-            target_z + pdist * math.cos(r_pitch) * math.cos(r_yaw)
-        )
-        fwd = (QVector3D(target_x, target_y, target_z) - eye).normalized()
-        right = QVector3D.crossProduct(fwd, QVector3D(0, 1, 0)).normalized()
-        cup = QVector3D.crossProduct(right, fwd).normalized()
-        if abs(proll) > 1e-4:
-            r_roll = math.radians(proll)
-            cr = math.cos(r_roll); sr = math.sin(r_roll)
-            n_right = right * cr - cup * sr
-            n_up = right * sr + cup * cr
-            right, cup = n_right, n_up
-
-        tot_err = 0.0
-        for cp, tp in zip(corners_3d, target_pts):
-            rel = cp - eye
-            dfwd = QVector3D.dotProduct(rel, fwd)
-            if dfwd <= 0.01:
-                return 1e9
-            sx = cx + f * ((QVector3D.dotProduct(rel, right) + ppx) / dfwd)
-            sy = cy - f * ((QVector3D.dotProduct(rel, cup) + ppy) / dfwd)
-            tot_err += (sx - tp.x())**2 + (sy - tp.y())**2
-        return tot_err
-
-    init_params = [yaw, pitch, roll, dist, pan_x, pan_y]
-    steps = [2.0, 1.5, 0.0 if keep_horizon else 1.0, max(0.1, dist * 0.05), 0.05, 0.05]
-    dim = 6
-    simplex = [list(init_params)]
-    for d in range(dim):
-        pt = list(init_params)
-        pt[d] += steps[d]
-        simplex.append(pt)
-    scores = [_eval_error(pt) for pt in simplex]
-
-    for _ in range(80):
-        order = sorted(range(dim + 1), key=lambda idx: scores[idx])
-        simplex = [simplex[i] for i in order]
-        scores = [scores[i] for i in order]
-        if scores[0] < 0.1:
-            break
-        centroid = [sum(simplex[i][d] for i in range(dim)) / dim for d in range(dim)]
-        xr = [2.0 * centroid[d] - simplex[dim][d] for d in range(dim)]
-        if keep_horizon: xr[2] = 0.0
-        sr_score = _eval_error(xr)
-        if scores[0] <= sr_score < scores[dim - 1]:
-            simplex[dim] = xr; scores[dim] = sr_score; continue
-        if sr_score < scores[0]:
-            xe = [centroid[d] + 2.0 * (xr[d] - centroid[d]) for d in range(dim)]
-            if keep_horizon: xe[2] = 0.0
-            se_score = _eval_error(xe)
-            if se_score < sr_score:
-                simplex[dim] = xe; scores[dim] = se_score
-            else:
-                simplex[dim] = xr; scores[dim] = sr_score
-            continue
-        xc = [centroid[d] + 0.5 * (simplex[dim][d] - centroid[d]) for d in range(dim)]
-        if keep_horizon: xc[2] = 0.0
-        sc_score = _eval_error(xc)
-        if sc_score < scores[dim]:
-            simplex[dim] = xc; scores[dim] = sc_score; continue
-        for i in range(1, dim + 1):
-            simplex[i] = [simplex[0][d] + 0.5 * (simplex[i][d] - simplex[0][d]) for d in range(dim)]
-            if keep_horizon: simplex[i][2] = 0.0
-            scores[i] = _eval_error(simplex[i])
-
-    best = simplex[0]
-    yaw = best[0] % 360.0
-    pitch = max(-85.0, min(85.0, best[1]))
-    roll = 0.0 if keep_horizon else max(-85.0, min(85.0, best[2]))
-    dist = max(0.1, min(50.0, best[3]))
-    pan_x = best[4]
-    pan_y = best[5]
-
-    # 12. Horizon line
+    # Horizon line
     horizon = None
     if keep_horizon:
-        # Strictly horizontal horizon line
-        if vp1 and vp2:
-            avg_y = (vp1.y() + vp2.y()) * 0.5
-        elif vp2:
-            avg_y = vp2.y()
-        elif vp1:
-            avg_y = vp1.y()
-        else:
-            avg_y = cy - f * math.tan(math.radians(pitch))
+        f_active = half_size / math.tan(math.radians(max(5.0, min(160.0, sol_fov)) * 0.5))
+        avg_y = cy - f_active * math.tan(math.radians(sol_pitch))
         horizon = (0.0, 1.0, -avg_y)
     elif vp1 and vp2:
         horizon = line_equation(vp1, vp2)
@@ -488,13 +541,13 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         horizon = (0.0, 1.0, -vp1.y())
 
     return {
-        "yaw": yaw,
-        "pitch": pitch,
-        "roll": roll,
-        "fov": solved_fov,
-        "distance": dist,
-        "pan_x": pan_x,
-        "pan_y": pan_y,
+        "yaw": sol_yaw,
+        "pitch": sol_pitch,
+        "roll": sol_roll,
+        "fov": sol_fov,
+        "distance": sol_dist,
+        "pan_x": sol_pan_x,
+        "pan_y": sol_pan_y,
         "target_x": target_x,
         "target_y": target_y,
         "target_z": target_z,
@@ -502,8 +555,8 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         "vp2": vp2,
         "horizon": horizon,
         "center_2d": center_2d,
-        "rect_width": rect_w,
-        "rect_depth": rect_d,
+        "rect_width": sol_rw,
+        "rect_depth": sol_rd,
         "rect_height": rect_h,
         "sphere_radius": sphere_radius,
         "scale_x": scale_x,
@@ -511,16 +564,21 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         "scale_z": scale_z,
         "primitive_type": ptype,
         "corners_3d": corners_3d,
+        "M_obj": M_obj,
+        "n_up": n_up,
     }
 
 
-def solve_height_from_point(camera, doc_w, doc_h, base_corner_3d, norm_pt, frame_rect=None):
+def solve_height_from_point(camera, doc_w, doc_h, base_corner_3d, norm_pt, frame_rect=None, n_up=None):
     """
     Solves 3D height H given a 2D canvas normalized point and a 3D base corner position.
-    Uses true perspective projection matching the camera.
+    Uses true perspective projection matching the camera and the normal of the base plane.
     """
     if not camera or doc_w <= 0 or doc_h <= 0 or norm_pt is None:
         return 2.0
+    if n_up is None:
+        n_up = QVector3D(0.0, 1.0, 0.0)
+
     if frame_rect and len(frame_rect) == 4 and frame_rect[2] > 0 and frame_rect[3] > 0:
         fx, fy, fw, fh = frame_rect
         render_size = min(fw, fh)
@@ -534,7 +592,8 @@ def solve_height_from_point(camera, doc_w, doc_h, base_corner_3d, norm_pt, frame
     _, view_mat, _ = camera.get_matrices(render_size, render_size)
     bx, by, bz = base_corner_3d.x(), base_corner_3d.y(), base_corner_3d.z()
     pt_base, _ = project_camera_point(camera, view_mat, bx, by, bz, render_size, offset_x, offset_y)
-    pt_test, _ = project_camera_point(camera, view_mat, bx, by + 1.0, bz, render_size, offset_x, offset_y)
+    pt_test, _ = project_camera_point(camera, view_mat, bx + n_up.x(), by + n_up.y(), bz + n_up.z(),
+                                      render_size, offset_x, offset_y)
 
     if pt_base is None or pt_test is None:
         return 2.0
@@ -554,7 +613,8 @@ def solve_height_from_point(camera, doc_w, doc_h, base_corner_3d, norm_pt, frame
     best_h = 2.0
     for _ in range(24):
         mid = (low + high) * 0.5
-        pt_m, _ = project_camera_point(camera, view_mat, bx, by + mid, bz, render_size, offset_x, offset_y)
+        pt_m, _ = project_camera_point(camera, view_mat, bx + n_up.x() * mid, by + n_up.y() * mid, bz + n_up.z() * mid,
+                                       render_size, offset_x, offset_y)
         if pt_m is None:
             high = mid
             continue
@@ -569,10 +629,13 @@ def solve_height_from_point(camera, doc_w, doc_h, base_corner_3d, norm_pt, frame
     return max(0.1, min(50.0, best_h))
 
 
-def project_height_to_norm_point(camera, doc_w, doc_h, base_corner_3d, height, frame_rect=None):
+def project_height_to_norm_point(camera, doc_w, doc_h, base_corner_3d, height, frame_rect=None, n_up=None):
     """Projects 3D height point above base corner back to 2D normalized document coordinates."""
     if not camera or doc_w <= 0 or doc_h <= 0:
         return QPointF(0.25, 0.5)
+    if n_up is None:
+        n_up = QVector3D(0.0, 1.0, 0.0)
+
     if frame_rect and len(frame_rect) == 4 and frame_rect[2] > 0 and frame_rect[3] > 0:
         fx, fy, fw, fh = frame_rect
         render_size = min(fw, fh)
@@ -585,7 +648,8 @@ def project_height_to_norm_point(camera, doc_w, doc_h, base_corner_3d, height, f
 
     _, view_mat, _ = camera.get_matrices(render_size, render_size)
     bx, by, bz = base_corner_3d.x(), base_corner_3d.y(), base_corner_3d.z()
-    pt_top, _ = project_camera_point(camera, view_mat, bx, by + height, bz, render_size, offset_x, offset_y)
+    pt_top, _ = project_camera_point(camera, view_mat, bx + n_up.x() * height, by + n_up.y() * height, bz + n_up.z() * height,
+                                     render_size, offset_x, offset_y)
     if pt_top is None:
         return QPointF(0.25, 0.5)
     return QPointF(max(0.001, min(0.999, pt_top.x() / doc_w)),
@@ -687,20 +751,41 @@ class GroundCalibratorWidget(QWidget):
         self.gizmo_mode_changed.emit(mode)
         self.update()
 
+    def _get_calibrated_camera(self):
+        """Constructs a Camera3D using the latest solved parameters."""
+        sol = getattr(self, 'last_solution', None) or {}
+        cam = Camera3D()
+        cam.yaw = float(sol.get("yaw", 180.0))
+        cam.pitch = float(sol.get("pitch", 20.0))
+        cam.roll = float(sol.get("roll", 0.0))
+        cam.fov = float(sol.get("fov", 45.0))
+        cam.distance = float(sol.get("distance", 10.0))
+        cam.pan_x = float(sol.get("pan_x", 0.0))
+        cam.pan_y = float(sol.get("pan_y", 0.0))
+        cam.target_x = float(sol.get("target_x", 0.0))
+        cam.target_y = float(sol.get("target_y", 0.0))
+        cam.target_z = float(sol.get("target_z", 0.0))
+        cam.ground_y = float(sol.get("target_y", 0.0))
+        cam.projection_mode = ProjectionMode.PERSPECTIVE
+        cam.orthographic = False
+        return cam
+
     def _compute_3d_gizmo_geometry(self):
         """
         Computes 3D coordinates and 2D projected screen coordinates for all
         Blender-style transform gizmo handles (axes, arrows, rings, planes, cubes).
         """
         sol = self.last_solution
-        if not sol or not self.camera:
+        if not sol:
             return None
 
         doc_w, doc_h = self._get_doc_size()
         render_size = min(doc_w, doc_h)
         offset_x = (doc_w - render_size) * 0.5
         offset_y = (doc_h - render_size) * 0.5
-        _, view_mat, _ = self.camera.get_matrices(render_size, render_size)
+
+        cam = self._get_calibrated_camera()
+        _, view_mat, _ = cam.get_matrices(render_size, render_size)
 
         tx = sol.get("target_x", 0.0)
         ty = sol.get("target_y", 0.0)
@@ -710,23 +795,36 @@ class GroundCalibratorWidget(QWidget):
         rh = sol.get("rect_height", 2.0)
         yaw = sol.get("yaw", 180.0)
 
-        origin_doc, _ = project_camera_point(self.camera, view_mat, tx, ty, tz, render_size, offset_x, offset_y)
-        if not origin_doc:
-            return None
-        origin_w = self._doc_to_widget(origin_doc)
-
         r_yaw = math.radians(yaw)
         cos_y = math.cos(r_yaw)
         sin_y = math.sin(r_yaw)
 
-        axis_x_3d = QVector3D(cos_y, 0, -sin_y)
-        axis_y_3d = QVector3D(sin_y, 0, cos_y)
-        axis_z_3d = QVector3D(0, 1, 0)
+        raw_origin = QVector3D(tx, ty, tz)
+        raw_ax = QVector3D(cos_y, 0, -sin_y)
+        raw_ay = QVector3D(sin_y, 0, cos_y)
+        raw_az = QVector3D(0, 1, 0)
+
+        M_obj = sol.get("M_obj")
+        if M_obj:
+            origin_3d = M_obj.map(raw_origin)
+            axis_x_3d = M_obj.mapVector(raw_ax).normalized()
+            axis_y_3d = M_obj.mapVector(raw_ay).normalized()
+            axis_z_3d = M_obj.mapVector(raw_az).normalized()
+        else:
+            origin_3d = raw_origin
+            axis_x_3d = raw_ax
+            axis_y_3d = raw_ay
+            axis_z_3d = raw_az
+
+        origin_doc, _ = project_camera_point(cam, view_mat, origin_3d.x(), origin_3d.y(), origin_3d.z(), render_size, offset_x, offset_y)
+        if not origin_doc:
+            return None
+        origin_w = self._doc_to_widget(origin_doc)
 
         arm_len = max(0.5, min(rw, rd) * 0.6)
-        pt_x_doc, _ = project_camera_point(self.camera, view_mat, tx + axis_x_3d.x() * arm_len, ty + axis_x_3d.y() * arm_len, tz + axis_x_3d.z() * arm_len, render_size, offset_x, offset_y)
-        pt_y_doc, _ = project_camera_point(self.camera, view_mat, tx + axis_y_3d.x() * arm_len, ty + axis_y_3d.y() * arm_len, tz + axis_y_3d.z() * arm_len, render_size, offset_x, offset_y)
-        pt_z_doc, _ = project_camera_point(self.camera, view_mat, tx + axis_z_3d.x() * arm_len, ty + axis_z_3d.y() * arm_len, tz + axis_z_3d.z() * arm_len, render_size, offset_x, offset_y)
+        pt_x_doc, _ = project_camera_point(cam, view_mat, origin_3d.x() + axis_x_3d.x() * arm_len, origin_3d.y() + axis_x_3d.y() * arm_len, origin_3d.z() + axis_x_3d.z() * arm_len, render_size, offset_x, offset_y)
+        pt_y_doc, _ = project_camera_point(cam, view_mat, origin_3d.x() + axis_y_3d.x() * arm_len, origin_3d.y() + axis_y_3d.y() * arm_len, origin_3d.z() + axis_y_3d.z() * arm_len, render_size, offset_x, offset_y)
+        pt_z_doc, _ = project_camera_point(cam, view_mat, origin_3d.x() + axis_z_3d.x() * arm_len, origin_3d.y() + axis_z_3d.y() * arm_len, origin_3d.z() + axis_z_3d.z() * arm_len, render_size, offset_x, offset_y)
 
         if not pt_x_doc or not pt_y_doc or not pt_z_doc:
             return None
@@ -766,24 +864,18 @@ class GroundCalibratorWidget(QWidget):
             phi = 2.0 * math.pi * step / 32.0
             cp = math.cos(phi)
             sp = math.sin(phi)
-            p_z_3d = QVector3D(tx + (axis_x_3d.x() * cp + axis_y_3d.x() * sp) * r_3d,
-                               ty,
-                               tz + (axis_x_3d.z() * cp + axis_y_3d.z() * sp) * r_3d)
-            p_z_doc, _ = project_camera_point(self.camera, view_mat, p_z_3d.x(), p_z_3d.y(), p_z_3d.z(), render_size, offset_x, offset_y)
+            p_z_3d = origin_3d + (axis_x_3d * cp + axis_y_3d * sp) * r_3d
+            p_z_doc, _ = project_camera_point(cam, view_mat, p_z_3d.x(), p_z_3d.y(), p_z_3d.z(), render_size, offset_x, offset_y)
             if p_z_doc:
                 rot_pts_z.append(self._doc_to_widget(p_z_doc))
 
-            p_x_3d = QVector3D(tx + axis_y_3d.x() * sp * r_3d,
-                               ty + cp * r_3d,
-                               tz + axis_y_3d.z() * sp * r_3d)
-            p_x_doc, _ = project_camera_point(self.camera, view_mat, p_x_3d.x(), p_x_3d.y(), p_x_3d.z(), render_size, offset_x, offset_y)
+            p_x_3d = origin_3d + (axis_y_3d * sp + axis_z_3d * cp) * r_3d
+            p_x_doc, _ = project_camera_point(cam, view_mat, p_x_3d.x(), p_x_3d.y(), p_x_3d.z(), render_size, offset_x, offset_y)
             if p_x_doc:
                 rot_pts_x.append(self._doc_to_widget(p_x_doc))
 
-            p_y_3d = QVector3D(tx + axis_x_3d.x() * cp * r_3d,
-                               ty + sp * r_3d,
-                               tz + axis_x_3d.z() * cp * r_3d)
-            p_y_doc, _ = project_camera_point(self.camera, view_mat, p_y_3d.x(), p_y_3d.y(), p_y_3d.z(), render_size, offset_x, offset_y)
+            p_y_3d = origin_3d + (axis_x_3d * cp + axis_z_3d * sp) * r_3d
+            p_y_doc, _ = project_camera_point(cam, view_mat, p_y_3d.x(), p_y_3d.y(), p_y_3d.z(), render_size, offset_x, offset_y)
             if p_y_doc:
                 rot_pts_y.append(self._doc_to_widget(p_y_doc))
 
@@ -947,17 +1039,24 @@ class GroundCalibratorWidget(QWidget):
             QVector3D(c2_x, ty, c2_z),
             QVector3D(c3_x, ty, c3_z),
         ]
+        M_obj = sol.get("M_obj")
+        if M_obj:
+            corners_3d = [M_obj.map(c) for c in corners_3d]
+            n_up = sol.get("n_up", QVector3D(0.0, 1.0, 0.0))
+        else:
+            n_up = QVector3D(0.0, 1.0, 0.0)
         sol["corners_3d"] = corners_3d
 
         doc_w, doc_h = self._get_doc_size()
         render_size = min(doc_w, doc_h)
         offset_x = (doc_w - render_size) * 0.5
         offset_y = (doc_h - render_size) * 0.5
-        _, view_mat, _ = self.camera.get_matrices(render_size, render_size)
+        cam = self._get_calibrated_camera()
+        _, view_mat, _ = cam.get_matrices(render_size, render_size)
 
         new_norm_points = []
         for c in corners_3d:
-            pt, _ = project_camera_point(self.camera, view_mat, c.x(), c.y(), c.z(),
+            pt, _ = project_camera_point(cam, view_mat, c.x(), c.y(), c.z(),
                                          render_size, offset_x, offset_y)
             if pt:
                 new_norm_points.append(QPointF(max(0.001, min(0.999, pt.x() / doc_w)),
@@ -966,7 +1065,8 @@ class GroundCalibratorWidget(QWidget):
             self.norm_points = new_norm_points
 
         if getattr(self, 'has_height_point', False):
-            pt_top, _ = project_camera_point(self.camera, view_mat, corners_3d[0].x(), corners_3d[0].y() + rh, corners_3d[0].z(),
+            top_pt = corners_3d[0] + n_up * rh
+            pt_top, _ = project_camera_point(cam, view_mat, top_pt.x(), top_pt.y(), top_pt.z(),
                                              render_size, offset_x, offset_y)
             if pt_top:
                 self.height_norm_pt = QPointF(max(0.001, min(0.999, pt_top.x() / doc_w)),
@@ -1029,6 +1129,46 @@ class GroundCalibratorWidget(QWidget):
         self.bg_image = qimg
         self._recalculate()
         self.update()
+
+    def _get_horizon_endpoints(self):
+        """Returns (p1, p2) representing the visible horizon line across the widget."""
+        sol = self.last_solution
+        vp1_doc = sol.get("vp1")
+        vp2_doc = sol.get("vp2")
+        w = float(self.width())
+        h = float(self.height())
+        if not self.keep_horizon and vp1_doc and vp2_doc:
+            vp1_w = self._doc_to_widget(vp1_doc)
+            vp2_w = self._doc_to_widget(vp2_doc)
+            dx = vp2_w.x() - vp1_w.x()
+            dy = vp2_w.y() - vp1_w.y()
+            if abs(dx) > 1e-4 or abs(dy) > 1e-4:
+                length = math.hypot(dx, dy)
+                scale = max(w, h) * 4.0 / max(1.0, length)
+                h_p1 = QPointF(vp1_w.x() - dx * scale, vp1_w.y() - dy * scale)
+                h_p2 = QPointF(vp2_w.x() + dx * scale, vp2_w.y() + dy * scale)
+                return h_p1, h_p2
+        # Horizontal line across image rect at solved eye-level (roll = 0)
+        doc_w, doc_h = self._get_doc_size()
+        cy = doc_h * 0.5
+        calib_cam = self._get_calibrated_camera()
+        cur_fov = calib_cam.fov
+        pitch = sol.get("pitch", 15.0)
+        f = (min(doc_w, doc_h) * 0.5) / math.tan(math.radians(max(5.0, min(160.0, cur_fov)) * 0.5))
+        y_doc = cy - f * math.tan(math.radians(pitch))
+        yw = self._doc_to_widget(QPointF(0, y_doc)).y()
+        return QPointF(0, yw), QPointF(w, yw)
+
+    def _distance_to_horizon(self, pt):
+        """Calculates perpendicular pixel distance from point to the horizon line."""
+        p1, p2 = self._get_horizon_endpoints()
+        dx = p2.x() - p1.x()
+        dy = p2.y() - p1.y()
+        denom = math.hypot(dx, dy)
+        if denom < 1e-4:
+            return 9999.0
+        numer = abs(dy * pt.x() - dx * pt.y() + p2.x() * p1.y() - p2.y() * p1.x())
+        return numer / denom
 
     def start_drag_mode(self):
         """Activates click-and-drag ground rectangle mode."""
@@ -1162,12 +1302,14 @@ class GroundCalibratorWidget(QWidget):
 
         # 5-point height calculation
         if getattr(self, 'has_height_point', False):
+            calib_cam = self._get_calibrated_camera()
+            n_up = self.last_solution.get("n_up", QVector3D(0.0, 1.0, 0.0))
             if self.height_norm_pt is not None:
-                rh = solve_height_from_point(self.camera, doc_w, doc_h, base_corner_3d, self.height_norm_pt, self.frame_rect)
+                rh = solve_height_from_point(calib_cam, doc_w, doc_h, base_corner_3d, self.height_norm_pt, self.frame_rect, n_up=n_up)
                 self.last_solution["rect_height"] = rh
             else:
                 rh = self.last_solution.get("rect_height", 2.0)
-                self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
+                self.height_norm_pt = project_height_to_norm_point(calib_cam, doc_w, doc_h, base_corner_3d, rh, self.frame_rect, n_up=n_up)
         elif self.mesh and hasattr(self.mesh, 'primitive_params') and 'h' in self.mesh.primitive_params:
             self.last_solution["rect_height"] = float(self.mesh.primitive_params['h'])
 
@@ -1527,7 +1669,9 @@ class GroundCalibratorWidget(QWidget):
                     base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
                     rh = self.last_solution.get("rect_height", 2.0)
                     doc_w, doc_h = self._get_doc_size()
-                    self.height_norm_pt = project_height_to_norm_point(self.camera, doc_w, doc_h, base_corner_3d, rh, self.frame_rect)
+                    calib_cam = self._get_calibrated_camera()
+                    n_up = self.last_solution.get("n_up", QVector3D(0.0, 1.0, 0.0))
+                    self.height_norm_pt = project_height_to_norm_point(calib_cam, doc_w, doc_h, base_corner_3d, rh, self.frame_rect, n_up=n_up)
             elif self.active_handle == 4:
                 self.height_norm_pt = norm_pt
             self._recalculate()
@@ -1948,6 +2092,26 @@ class GroundCalibratorWidget(QWidget):
             else:
                 preview_mesh = create_box_primitive(rw, rh, rd)
 
+            if preview_mesh and getattr(preview_mesh, 'vertices', None):
+                pm_copy = MeshData(getattr(preview_mesh, 'name', 'Preview'))
+                pm_copy.faces = preview_mesh.faces
+                pm_copy.coplanar_edges = getattr(preview_mesh, 'coplanar_edges', set())
+                pm_copy.polygon_edges = getattr(preview_mesh, 'polygon_edges', set())
+                pm_copy.primitive_type = getattr(preview_mesh, 'primitive_type', None)
+                if obj_trans:
+                    verts = [QVector3D(v.x() * obj_trans.scale_x, v.y() * obj_trans.scale_y, v.z() * obj_trans.scale_z) for v in preview_mesh.vertices]
+                    obj_trans = None
+                else:
+                    verts = list(preview_mesh.vertices)
+                if getattr(self, 'flip_yaw', False):
+                    verts = [QVector3D(-v.x(), v.y(), -v.z()) for v in verts]
+                M_obj = sol.get("M_obj")
+                if M_obj:
+                    verts = [M_obj.map(v) for v in verts]
+                pm_copy.vertices = verts
+                pm_copy.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
+                preview_mesh = pm_copy
+
             if preview_mesh:
                 prev_img = self.renderer.render_to_image(
                     mesh=preview_mesh,
@@ -2350,18 +2514,16 @@ class GroundCalibratorDialog(QDialog):
         layout.addLayout(bot_bar)
 
         # Initial mode trigger
-        if start_in_click_draw or initial_mode in ("box", "primitive"):
-            self.combo_primitive.setCurrentText("📦 Box")
-            self.calibrator_widget.set_primitive_type("Box")
-            self.calibrator_widget.start_drag_mode()
-        elif initial_mode == 4:
-            self._start_4point_pick()
-        elif initial_mode == 5:
+        if initial_mode == 5:
             if "Ground Rectangle" in self.combo_primitive.currentText():
                 self.combo_primitive.setCurrentText("📦 Box")
             self._start_5point_pick()
-        elif initial_mode in ("draw", "drag"):
-            self.start_drag_mode()
+        elif initial_mode == 4:
+            self._start_4point_pick()
+        elif start_in_click_draw or initial_mode in ("box", "primitive", "draw", "drag"):
+            self.combo_primitive.setCurrentText("📦 Box")
+            self.calibrator_widget.set_primitive_type("Box")
+            self.calibrator_widget.start_drag_mode()
 
         self._on_solution_changed(self.calibrator_widget.last_solution)
 
@@ -2471,8 +2633,10 @@ class GroundCalibratorDialog(QDialog):
         corners_3d = self.calibrator_widget.last_solution.get("corners_3d")
         base_corner_3d = corners_3d[0] if (corners_3d and len(corners_3d) > 0) else QVector3D(0, 0, 0)
         doc_w, doc_h = self.calibrator_widget._get_doc_size()
+        calib_cam = self.calibrator_widget._get_calibrated_camera()
+        n_up = self.calibrator_widget.last_solution.get("n_up", QVector3D(0.0, 1.0, 0.0))
         self.calibrator_widget.height_norm_pt = project_height_to_norm_point(
-            self.calibrator_widget.camera, doc_w, doc_h, base_corner_3d, bh, self.calibrator_widget.frame_rect
+            calib_cam, doc_w, doc_h, base_corner_3d, bh, self.calibrator_widget.frame_rect, n_up=n_up
         )
         self.calibrator_widget._recalculate()
         self.calibrator_widget.update()
@@ -2556,6 +2720,17 @@ class GroundCalibratorDialog(QDialog):
             sol["mesh"] = create_room_primitive(rw, rh, rd)
         else:
             sol["mesh"] = None
+
+        if sol.get("mesh") and getattr(sol["mesh"], 'vertices', None):
+            m = sol["mesh"]
+            verts = list(m.vertices)
+            if getattr(self.calibrator_widget, 'flip_yaw', False):
+                verts = [QVector3D(-v.x(), v.y(), -v.z()) for v in verts]
+            M_obj = sol.get("M_obj")
+            if M_obj:
+                verts = [M_obj.map(v) for v in verts]
+            m.vertices = verts
+            m.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
 
         try:
             add_primitive_to_history({

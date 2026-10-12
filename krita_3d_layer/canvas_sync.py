@@ -3,7 +3,7 @@ Renders and stamps the 3D viewport onto Krita paint layers.
 """
 
 from PyQt5.QtGui import QColor, QImage, QPainter
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QPointF
 
 try:
     from krita import Krita
@@ -68,6 +68,87 @@ class CanvasSyncManager:
         return None
 
     @staticmethod
+    def get_canvas_view_info():
+        """
+        Calculates the visible document rectangle currently displayed in Krita's canvas viewport,
+        mimicking the artist's current zoom and pan.
+        Returns a dict:
+            {
+                "rect": (rx, ry, rw, rh),   # Document coordinates of visible canvas region
+                "zoom": float,              # Active canvas zoom level
+                "snapshot": QImage,         # Pixel-accurate document slice for visible view
+                "widget_size": (cw, ch),    # Canvas widget screen size
+            }
+        """
+        doc = CanvasSyncManager.get_active_document()
+        if not doc or not Krita:
+            return {"rect": None, "zoom": 1.0, "snapshot": None, "widget_size": None}
+
+        doc_w = doc.width()
+        doc_h = doc.height()
+
+        try:
+            app = Krita.instance()
+            win = app.activeWindow()
+            view = win.activeView() if win else None
+            canvas = view.canvas() if view else None
+            zoom = canvas.zoomLevel() if canvas else 1.0
+
+            qwin = win.qwindow() if win else None
+            canvas_w = None
+            if qwin:
+                from PyQt5.QtWidgets import QWidget
+                for w in qwin.findChildren(QWidget):
+                    if w.metaObject().className() == "KisOpenGLCanvas2" and w.isVisible():
+                        canvas_w = w
+                        break
+
+            if view and canvas_w and canvas_w.width() > 0 and canvas_w.height() > 0:
+                cw, ch = canvas_w.width(), canvas_w.height()
+                t_f2c = view.flakeToCanvasTransform()
+                t_f2i = view.flakeToImageTransform()
+
+                inv_f2c, ok = t_f2c.inverted()
+                if ok:
+                    p_tl_flake = inv_f2c.map(QPointF(0, 0))
+                    p_br_flake = inv_f2c.map(QPointF(cw, ch))
+                    p_tl_img = t_f2i.map(p_tl_flake)
+                    p_br_img = t_f2i.map(p_br_flake)
+
+                    rx = min(p_tl_img.x(), p_br_img.x())
+                    ry = min(p_tl_img.y(), p_br_img.y())
+                    rw = abs(p_br_img.x() - p_tl_img.x())
+                    rh = abs(p_br_img.y() - p_tl_img.y())
+
+                    clamped_rx = max(0, min(doc_w - 1, int(rx)))
+                    clamped_ry = max(0, min(doc_h - 1, int(ry)))
+                    clamped_rw = max(1, min(doc_w - clamped_rx, int(rw)))
+                    clamped_rh = max(1, min(doc_h - clamped_ry, int(rh)))
+
+                    data = doc.pixelData(clamped_rx, clamped_ry, clamped_rw, clamped_rh)
+                    qimg = None
+                    if data:
+                        qimg = QImage(data, clamped_rw, clamped_rh, QImage.Format_ARGB32).copy()
+
+                    return {
+                        "rect": (clamped_rx, clamped_ry, clamped_rw, clamped_rh),
+                        "zoom": float(zoom),
+                        "snapshot": qimg,
+                        "widget_size": (cw, ch)
+                    }
+        except Exception:
+            pass
+
+        # Fallback to full document if view coordinates cannot be determined
+        full_snap = CanvasSyncManager.get_canvas_snapshot()
+        return {
+            "rect": (0, 0, doc_w, doc_h),
+            "zoom": 1.0,
+            "snapshot": full_snap,
+            "widget_size": (doc_w, doc_h)
+        }
+
+    @staticmethod
     def ensure_layer_visible(layer_mode="named", layer_name="3D Perspective & Model"):
         """
         If the target Krita layer exists and is currently hidden, unhides it
@@ -104,7 +185,8 @@ class CanvasSyncManager:
                               transparent_bg=True, custom_bg=None,
                               scale_factor=1.0, frame=None,
                               grid_settings=None, draw_model=True,
-                              object_transform=None, set_active=True):
+                              object_transform=None, set_active=True,
+                              opacity=None, restore_node=None):
         """
         Renders the 3D model and/or perspective grid onto a Krita paint layer.
         If frame=(fx, fy, fw, fh) is provided, limits rendering strictly within that frame.
@@ -253,8 +335,17 @@ class CanvasSyncManager:
 
         # Write pixel data to layer
         target_node.setPixelData(pixel_data, out_x, out_y, out_w, out_h)
-        if set_active:
+
+        if opacity is not None:
+            op_val = max(0, min(255, int(opacity * 255) if opacity <= 1.0 else int(opacity)))
+            if hasattr(target_node, "setOpacity"):
+                target_node.setOpacity(op_val)
+
+        if restore_node:
+            doc.setActiveNode(restore_node)
+        elif set_active:
             doc.setActiveNode(target_node)
+
         doc.refreshProjection()
         if hasattr(doc, 'waitForDone'):
             try:

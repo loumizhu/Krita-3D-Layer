@@ -3,15 +3,13 @@ Custom UI widgets: CollapsibleSection and SphereLightWidget.
 """
 
 import math
-from PyQt5.QtWidgets import (
+from .qt_compat import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFrame, QSizePolicy, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
-)
-from PyQt5.QtGui import (
+    QFrame, QSizePolicy, QSpinBox, QDoubleSpinBox, QAbstractSpinBox,
     QPainter, QColor, QPen, QBrush, QRadialGradient,
-    QPolygonF, QFont, QPainterPath
+    QPolygonF, QFont, QPainterPath,
+    Qt, QPoint, QPointF, QRectF, QRect, pyqtSignal, QSize, QEvent
 )
-from PyQt5.QtCore import Qt, QPoint, QPointF, QRectF, QRect, pyqtSignal, QSize, QEvent
 
 
 class CollapsibleSection(QWidget):

@@ -2,8 +2,7 @@
 Renders and stamps the 3D viewport onto Krita paint layers.
 """
 
-from PyQt5.QtGui import QColor, QImage, QPainter
-from PyQt5.QtCore import Qt, QPointF
+from .qt_compat import Qt, QColor, QImage, QPainter, QPointF
 
 try:
     from krita import Krita
@@ -110,15 +109,21 @@ class CanvasSyncManager:
 
                 inv_f2c, ok = t_f2c.inverted()
                 if ok:
-                    p_tl_flake = inv_f2c.map(QPointF(0, 0))
-                    p_br_flake = inv_f2c.map(QPointF(cw, ch))
-                    p_tl_img = t_f2i.map(p_tl_flake)
-                    p_br_img = t_f2i.map(p_br_flake)
+                    # Map all 4 widget corners to handle rotated/scaled canvas views accurately
+                    corners = [
+                        QPointF(0, 0),
+                        QPointF(cw, 0),
+                        QPointF(cw, ch),
+                        QPointF(0, ch)
+                    ]
+                    img_pts = [t_f2i.map(inv_f2c.map(pt)) for pt in corners]
+                    xs = [pt.x() for pt in img_pts]
+                    ys = [pt.y() for pt in img_pts]
 
-                    rx = min(p_tl_img.x(), p_br_img.x())
-                    ry = min(p_tl_img.y(), p_br_img.y())
-                    rw = abs(p_br_img.x() - p_tl_img.x())
-                    rh = abs(p_br_img.y() - p_tl_img.y())
+                    rx = min(xs)
+                    ry = min(ys)
+                    rw = max(xs) - rx
+                    rh = max(ys) - ry
 
                     clamped_rx = max(0, min(doc_w - 1, int(rx)))
                     clamped_ry = max(0, min(doc_h - 1, int(ry)))
@@ -307,26 +312,39 @@ class CanvasSyncManager:
         color_depth = doc.colorDepth() if hasattr(doc, 'colorDepth') else "U8"
 
         if color_model == "RGBA" and color_depth == "U16":
-            # Expand 8-bit ARGB32 to 16-bit uint16 (little-endian 2 bytes per channel)
-            u16_bytes = bytearray(len(pixel_data) * 2)
-            for i, b in enumerate(pixel_data):
-                val16 = b * 257
-                u16_bytes[i * 2] = val16 & 0xFF
-                u16_bytes[i * 2 + 1] = (val16 >> 8) & 0xFF
-            pixel_data = bytes(u16_bytes)
+            # Fast vectorized conversion via NumPy if available, or precomputed 256-entry LUT
+            try:
+                import numpy as np
+                arr8 = np.frombuffer(pixel_data, dtype=np.uint8)
+                pixel_data = (arr8.astype(np.uint16) * 257).tobytes()
+            except ImportError:
+                u16_lut = [bytes([(b * 257) & 0xFF, ((b * 257) >> 8) & 0xFF]) for b in range(256)]
+                pixel_data = b"".join(u16_lut[b] for b in pixel_data)
         elif color_model == "GRAYA" and color_depth == "U8":
-            # Convert 4-channel BGRA to 2-channel Grayscale + Alpha
-            num_px = out_w * out_h
-            gray_bytes = bytearray(num_px * 2)
-            for i in range(num_px):
-                b = pixel_data[i * 4]
-                g = pixel_data[i * 4 + 1]
-                r = pixel_data[i * 4 + 2]
-                a = pixel_data[i * 4 + 3]
-                gray_val = int(0.299 * r + 0.587 * g + 0.114 * b)
-                gray_bytes[i * 2] = gray_val
-                gray_bytes[i * 2 + 1] = a
-            pixel_data = bytes(gray_bytes)
+            # Fast Grayscale conversion via NumPy or structured conversion
+            try:
+                import numpy as np
+                arr = np.frombuffer(pixel_data, dtype=np.uint8).reshape(-1, 4)
+                # BGRA channels: 0=B, 1=G, 2=R, 3=A
+                gray = (arr[:, 2].astype(np.float32) * 0.299 +
+                        arr[:, 1].astype(np.float32) * 0.587 +
+                        arr[:, 0].astype(np.float32) * 0.114).astype(np.uint8)
+                alpha = arr[:, 3]
+                graya = np.empty((len(gray), 2), dtype=np.uint8)
+                graya[:, 0] = gray
+                graya[:, 1] = alpha
+                pixel_data = graya.tobytes()
+            except ImportError:
+                num_px = out_w * out_h
+                gray_bytes = bytearray(num_px * 2)
+                for i in range(num_px):
+                    b = pixel_data[i * 4]
+                    g = pixel_data[i * 4 + 1]
+                    r = pixel_data[i * 4 + 2]
+                    a = pixel_data[i * 4 + 3]
+                    gray_bytes[i * 2] = int(0.299 * r + 0.587 * g + 0.114 * b)
+                    gray_bytes[i * 2 + 1] = a
+                pixel_data = bytes(gray_bytes)
         elif color_model not in ("RGBA", "GRAYA"):
             raise RuntimeError(
                 f"Document color model '{color_model}' is not supported for 3D stamping. "

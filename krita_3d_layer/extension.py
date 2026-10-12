@@ -2,8 +2,7 @@
 Extension menu entries for Tools -> Scripts.
 """
 
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QPushButton, QHBoxLayout
-from PyQt5.QtCore import Qt
+from .qt_compat import QDialog, QVBoxLayout, QPushButton, QHBoxLayout, Qt
 
 try:
     from krita import Extension, Krita

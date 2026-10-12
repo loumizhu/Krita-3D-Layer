@@ -16,12 +16,10 @@ import os
 import json
 import datetime
 import math
-from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal, QByteArray
-from PyQt5.QtGui import (
+from .qt_compat import (
+    Qt, QPointF, QRectF, pyqtSignal, QByteArray,
     QPainter, QPen, QColor, QBrush, QPolygonF, QFont,
-    QLinearGradient, QVector3D, QVector4D, QCursor
-)
-from PyQt5.QtWidgets import (
+    QLinearGradient, QVector3D, QVector4D, QCursor,
     QWidget, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QCheckBox, QComboBox, QFrame, QSizePolicy, QSlider
 )

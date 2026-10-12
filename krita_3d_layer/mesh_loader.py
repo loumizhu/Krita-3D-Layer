@@ -7,7 +7,7 @@ import math
 import struct
 import json
 import base64
-from PyQt5.QtGui import QVector3D
+from .qt_compat import QVector3D
 
 
 class MeshData:

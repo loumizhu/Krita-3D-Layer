@@ -6,14 +6,13 @@ with quick shortcuts to most-used features, custom button styling, and presets.
 
 import os
 import json
-from PyQt5.QtWidgets import (
+from .qt_compat import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel,
     QScrollArea, QFrame, QDialog, QListWidget, QListWidgetItem,
     QComboBox, QColorDialog, QLineEdit, QMessageBox, QInputDialog,
-    QSizePolicy, QLayout, QSpinBox
+    QSizePolicy, QLayout, QSpinBox, QColor, QFont,
+    Qt, pyqtSignal, QPoint, QRect, QSize
 )
-from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRect, QSize
 
 
 # =====================================================================

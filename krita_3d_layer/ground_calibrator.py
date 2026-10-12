@@ -6,16 +6,14 @@ import os
 import json
 import math
 import datetime
-from PyQt5.QtWidgets import (
+from .qt_compat import (
+    Qt, QPointF, QRectF, pyqtSignal, QByteArray,
+    QPainter, QColor, QPen, QBrush, QFont, QPolygonF, QImage, QCursor,
+    QVector3D, QVector4D, QMatrix4x4,
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QSizePolicy, QFrame, QCheckBox, QApplication, QDesktopWidget,
     QComboBox, QMenu, QAction
 )
-from PyQt5.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QPolygonF, QImage, QCursor,
-    QVector3D, QVector4D, QMatrix4x4
-)
-from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal, QByteArray
 
 from .renderer import (
     Camera3D, Lighting3D, Renderer3D, RenderStyle, project_camera_point,
@@ -488,11 +486,15 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
 
         _, view_tilted, _ = cam_sol.get_matrices(render_size, render_size)
         _, view_level, _ = cam_level.get_matrices(render_size, render_size)
-        view_level_inv, _ = view_level.inverted()
-        M_obj = view_level_inv * view_tilted
-        cam_sol = cam_level
-        sol_roll = 0.0
-        n_up = M_obj.mapVector(QVector3D(0.0, 1.0, 0.0)).normalized()
+        view_level_inv, ok = view_level.inverted()
+        if ok:
+            M_obj = view_level_inv * view_tilted
+            cam_sol = cam_level
+            sol_roll = 0.0
+            n_up = M_obj.mapVector(QVector3D(0.0, 1.0, 0.0)).normalized()
+        else:
+            M_obj = None
+            n_up = QVector3D(0.0, 1.0, 0.0)
     else:
         n_up = QVector3D(0.0, 1.0, 0.0)
 
@@ -2729,6 +2731,7 @@ class GroundCalibratorDialog(QDialog):
             M_obj = sol.get("M_obj")
             if M_obj:
                 verts = [M_obj.map(v) for v in verts]
+                m.transform_matrix = M_obj
             m.vertices = verts
             m.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
 

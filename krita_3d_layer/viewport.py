@@ -3,11 +3,11 @@ Interactive 3D viewport widget with camera navigation and perspective overlays.
 """
 
 import math
-from PyQt5.QtWidgets import QWidget, QSizePolicy, QToolTip, QPushButton
-from PyQt5.QtGui import (
-    QPainter, QColor, QFont, QPen, QBrush, QImage, QLinearGradient, QCursor, QVector3D
+from .qt_compat import (
+    QWidget, QSizePolicy, QToolTip, QPushButton,
+    QPainter, QColor, QFont, QPen, QBrush, QImage, QLinearGradient, QCursor, QVector3D,
+    Qt, QPoint, QRect, QPointF, pyqtSignal
 )
-from PyQt5.QtCore import Qt, QPoint, QRect, QPointF, pyqtSignal
 
 from .renderer import (
     Camera3D, Lighting3D, Renderer3D, RenderStyle,

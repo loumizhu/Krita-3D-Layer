@@ -36,7 +36,20 @@ def install_files():
     print(f"  -> Copied {DESKTOP_SRC} to {DESKTOP_DEST}")
 
     # 2. Package directory (use Directory Junction, symlink, or copy)
+    is_unc = PACKAGE_SRC.startswith(("\\\\", "//"))
+    installed_via_link = False
+
+    # Check if existing link is valid and points to PACKAGE_SRC
     if os.path.exists(PACKAGE_DEST) or os.path.islink(PACKAGE_DEST):
+        try:
+            if os.path.samefile(PACKAGE_SRC, PACKAGE_DEST):
+                print(f"  -> Existing destination already links to source: {PACKAGE_DEST}")
+                installed_via_link = True
+        except Exception:
+            pass
+
+    # If broken link or not matching, remove it
+    if not installed_via_link and (os.path.exists(PACKAGE_DEST) or os.path.islink(PACKAGE_DEST) or os.path.lexists(PACKAGE_DEST)):
         try:
             if os.path.islink(PACKAGE_DEST):
                 os.unlink(PACKAGE_DEST)
@@ -48,31 +61,32 @@ def install_files():
         except Exception as e:
             print(f"  Warning removing existing destination: {e}")
 
-    installed_via_link = False
-    if sys.platform == "win32":
-        try:
-            import _winapi
-            _winapi.CreateJunction(PACKAGE_SRC, PACKAGE_DEST)
-            print(f"  -> Created directory junction: {PACKAGE_DEST} -> {PACKAGE_SRC}")
-            installed_via_link = True
-        except Exception:
+    if not installed_via_link:
+        # Windows Junctions only work on local volumes, not UNC network paths
+        if sys.platform == "win32" and not is_unc:
+            try:
+                import _winapi
+                _winapi.CreateJunction(PACKAGE_SRC, PACKAGE_DEST)
+                print(f"  -> Created directory junction: {PACKAGE_DEST} -> {PACKAGE_SRC}")
+                installed_via_link = True
+            except Exception:
+                try:
+                    os.symlink(PACKAGE_SRC, PACKAGE_DEST, target_is_directory=True)
+                    print(f"  -> Created symlink: {PACKAGE_DEST} -> {PACKAGE_SRC}")
+                    installed_via_link = True
+                except Exception:
+                    pass
+        elif sys.platform != "win32":
             try:
                 os.symlink(PACKAGE_SRC, PACKAGE_DEST, target_is_directory=True)
                 print(f"  -> Created symlink: {PACKAGE_DEST} -> {PACKAGE_SRC}")
                 installed_via_link = True
             except Exception:
                 pass
-    else:
-        try:
-            os.symlink(PACKAGE_SRC, PACKAGE_DEST, target_is_directory=True)
-            print(f"  -> Created symlink: {PACKAGE_DEST} -> {PACKAGE_SRC}")
-            installed_via_link = True
-        except Exception:
-            pass
 
-    if not installed_via_link:
-        shutil.copytree(PACKAGE_SRC, PACKAGE_DEST)
-        print(f"  -> Copied directory: {PACKAGE_SRC} to {PACKAGE_DEST}")
+        if not installed_via_link:
+            shutil.copytree(PACKAGE_SRC, PACKAGE_DEST, dirs_exist_ok=True)
+            print(f"  -> Copied directory: {PACKAGE_SRC} to {PACKAGE_DEST}")
 
 
 def enable_in_kritarc():
@@ -138,6 +152,8 @@ import importlib
 try:
     import krita_3d_layer
     importlib.reload(krita_3d_layer)
+    import krita_3d_layer.qt_compat
+    importlib.reload(krita_3d_layer.qt_compat)
     import krita_3d_layer.widgets
     importlib.reload(krita_3d_layer.widgets)
     import krita_3d_layer.docker

@@ -3,12 +3,11 @@ Software 3D rendering engine and perspective grid drawing using PyQt5 QPainter.
 """
 
 import math
-from PyQt5.QtGui import (
+from .qt_compat import (
     QMatrix4x4, QVector3D, QVector4D, QPainter, QImage,
     QColor, QBrush, QPen, QPolygonF, QFont, QPainterPath,
-    QLinearGradient
+    QLinearGradient, QPointF, Qt
 )
-from PyQt5.QtCore import QPointF, Qt
 
 
 class RenderStyle:

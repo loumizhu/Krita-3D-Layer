@@ -6,20 +6,20 @@ Hosts the viewport, model/material settings, camera angles, perspective grids, a
 import os
 import math
 import json
-from PyQt5.QtWidgets import (
+from .qt_compat import (
+    Qt, QTimer, QUrl,
+    QColor, QFont, QDesktopServices, QIcon,
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QComboBox, QCheckBox, QSlider, QFileDialog,
     QColorDialog, QScrollArea, QFrame, QSizePolicy, QGridLayout,
     QButtonGroup, QDoubleSpinBox, QSpinBox, QMenu,
-    QInputDialog, QMessageBox
+    QInputDialog, QMessageBox, QDockWidget
 )
-from PyQt5.QtGui import QColor, QFont, QDesktopServices, QIcon
-from PyQt5.QtCore import Qt, QTimer, QUrl
 
 try:
     from krita import DockWidget, Krita
 except ImportError:
-    from PyQt5.QtWidgets import QDockWidget as DockWidget
+    DockWidget = QDockWidget
     Krita = None
 
 from .viewport import Viewport3D, CAMERA_MODES, CAMERA_MODE_ORBIT
@@ -2235,6 +2235,8 @@ class Krita3DLayerDocker(DockWidget):
         if not self.mesh or not getattr(self.mesh, 'primitive_type', None):
             return
         ptype = self.mesh.primitive_type
+        saved_transform = getattr(self.mesh, 'transform_matrix', None)
+        saved_flip = getattr(self.mesh, 'flip_yaw', False)
         if ptype == "Box":
             w = self.spin_prim_box_w.value()
             h = self.spin_prim_box_h.value()
@@ -2282,6 +2284,16 @@ class Krita3DLayerDocker(DockWidget):
         else:
             return
 
+        if saved_transform and getattr(new_mesh, 'vertices', None):
+            new_mesh.transform_matrix = saved_transform
+            new_mesh.flip_yaw = saved_flip
+            verts = list(new_mesh.vertices)
+            if saved_flip:
+                from .qt_compat import QVector3D
+                verts = [QVector3D(-v.x(), v.y(), -v.z()) for v in verts]
+            verts = [saved_transform.map(v) for v in verts]
+            new_mesh.vertices = verts
+            new_mesh.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
         self.mesh = new_mesh
         self.viewport.set_mesh(new_mesh)
         self.lbl_model.setText(f"Primitive: {ptype}\n{len(new_mesh.vertices)} verts, {len(new_mesh.faces)} faces")
@@ -3258,9 +3270,6 @@ class Krita3DLayerDocker(DockWidget):
             initial_mode=initial_mode,
             parent=parent_widget
         )
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
 
         def on_applied(sol):
             # 1. Set generated 3D primitive mesh
@@ -3270,6 +3279,10 @@ class Krita3DLayerDocker(DockWidget):
                 self.mesh_path = None
                 ptype = sol.get("primitive_type", primitive_type)
                 self.mesh.primitive_type = ptype
+                if "M_obj" in sol and sol["M_obj"]:
+                    self.mesh.transform_matrix = sol["M_obj"]
+                if "flip_yaw" in sol:
+                    self.mesh.flip_yaw = sol["flip_yaw"]
                 if ptype == "Box":
                     self.mesh.primitive_params = {"w": sol.get("box_w", 2.0), "h": sol.get("box_h", 2.0), "d": sol.get("box_d", 2.0)}
                 self.viewport.set_mesh(self.mesh)
@@ -3370,9 +3383,6 @@ class Krita3DLayerDocker(DockWidget):
             start_in_click_draw=start_click_draw,
             parent=parent_widget
         )
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
         dlg.applied.connect(self._on_ground_calibrator_applied)
         dlg.exec_()
 
@@ -3390,6 +3400,10 @@ class Krita3DLayerDocker(DockWidget):
             self.mesh_path = None
             ptype = sol.get("primitive_type", "Box")
             self.mesh.primitive_type = ptype
+            if "M_obj" in sol and sol["M_obj"]:
+                self.mesh.transform_matrix = sol["M_obj"]
+            if "flip_yaw" in sol:
+                self.mesh.flip_yaw = sol["flip_yaw"]
             if ptype == "Box":
                 self.mesh.primitive_params = {"w": sol.get("box_w", 2.0), "h": sol.get("box_h", 2.0), "d": sol.get("box_d", 2.0)}
             elif ptype == "Cylinder":

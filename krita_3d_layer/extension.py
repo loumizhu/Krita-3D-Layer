@@ -134,8 +134,7 @@ class Krita3DLayerExtension(Extension):
 
     def show_manual(self):
         import os
-        from PyQt5.QtGui import QDesktopServices
-        from PyQt5.QtCore import QUrl
+        from .qt_compat import QDesktopServices, QUrl
         manual_path = os.path.join(os.path.dirname(__file__), "Manual.html")
         if os.path.exists(manual_path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(manual_path))

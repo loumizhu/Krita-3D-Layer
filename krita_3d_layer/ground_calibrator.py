@@ -526,8 +526,10 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         scale_x = max(0.01, min(100.0, sol_rw / orig_w))
         scale_z = max(0.01, min(100.0, sol_rd / orig_d))
         scale_y = (scale_x + scale_z) * 0.5
+        elev_offset = ground_y * (1.0 - scale_y)
     else:
         scale_x = scale_y = scale_z = 1.0
+        elev_offset = 0.0
 
     # Horizon line
     horizon = None
@@ -564,6 +566,7 @@ def solve_ground_rectangle(p0, p1, p2, p3, width, height, current_fov=45.0, mesh
         "scale_x": scale_x,
         "scale_y": scale_y,
         "scale_z": scale_z,
+        "elevation": elev_offset,
         "primitive_type": ptype,
         "corners_3d": corners_3d,
         "M_obj": M_obj,
@@ -2070,7 +2073,7 @@ class GroundCalibratorWidget(QWidget):
             elif ptype == "Sphere":
                 sr = min(rw, rd) * 0.5
                 preview_mesh = create_sphere_primitive(radius=sr, rings=16, sectors=24)
-                cam_prev.target_y = sol.get("target_y", 0.0) + sr
+                cam_prev.target_y = sol.get("target_y", 0.0)
             elif ptype == "Pyramid":
                 preview_mesh = create_pyramid_primitive(rw, rh, rd)
             elif ptype == "Cone":
@@ -2101,7 +2104,8 @@ class GroundCalibratorWidget(QWidget):
                 pm_copy.polygon_edges = getattr(preview_mesh, 'polygon_edges', set())
                 pm_copy.primitive_type = getattr(preview_mesh, 'primitive_type', None)
                 if obj_trans:
-                    verts = [QVector3D(v.x() * obj_trans.scale_x, v.y() * obj_trans.scale_y, v.z() * obj_trans.scale_z) for v in preview_mesh.vertices]
+                    elev = float(sol.get("elevation", 0.0))
+                    verts = [QVector3D(v.x() * obj_trans.scale_x, v.y() * obj_trans.scale_y + elev, v.z() * obj_trans.scale_z) for v in preview_mesh.vertices]
                     obj_trans = None
                 else:
                     verts = list(preview_mesh.vertices)
@@ -2709,13 +2713,13 @@ class GroundCalibratorDialog(QDialog):
         elif ptype == "Box":
             sol["mesh"] = create_box_primitive(rw, rh, rd)
         elif ptype == "Cylinder":
-            sol["mesh"] = create_cylinder_primitive(rw * 0.5, rh, 24)
+            sol["mesh"] = create_cylinder_primitive(min(rw, rd) * 0.5, rh, 24)
         elif ptype == "Sphere":
-            sol["mesh"] = create_sphere_primitive(rw * 0.5, 16, 24)
+            sol["mesh"] = create_sphere_primitive(min(rw, rd) * 0.5, 16, 24)
         elif ptype == "Pyramid":
             sol["mesh"] = create_pyramid_primitive(rw, rh, rd)
         elif ptype == "Cone":
-            sol["mesh"] = create_cone_primitive(rw * 0.5, rh, 24)
+            sol["mesh"] = create_cone_primitive(min(rw, rd) * 0.5, rh, 24)
         elif ptype == "Plane":
             sol["mesh"] = create_plane_primitive(rw, rd, 2)
         elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
@@ -2734,15 +2738,29 @@ class GroundCalibratorDialog(QDialog):
                 m.transform_matrix = M_obj
             m.vertices = verts
             m.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
+            if hasattr(m, 'compute_bounds'):
+                m.compute_bounds()
+            if hasattr(m, 'compute_face_normals'):
+                m.compute_face_normals()
 
         try:
+            now_dt = datetime.datetime.now()
             add_primitive_to_history({
-                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "id": now_dt.strftime("%Y%m%d%H%M%S%f"),
+                "timestamp": now_dt.strftime("%Y-%m-%d %H:%M"),
                 "primitive_type": ptype,
                 "box_w": rw, "box_h": rh, "box_d": rd,
-                "yaw": sol.get("yaw", 180.0),
-                "pitch": sol.get("pitch", 15.0),
-                "fov": sol.get("fov", 45.0)
+                "rect_width": rw, "rect_height": rh, "rect_depth": rd,
+                "yaw": float(sol.get("yaw", 180.0)),
+                "pitch": float(sol.get("pitch", 15.0)),
+                "roll": float(sol.get("roll", 0.0)),
+                "fov": float(sol.get("fov", 45.0)),
+                "distance": float(sol.get("distance", 3.5)),
+                "pan_x": float(sol.get("pan_x", 0.0)),
+                "pan_y": float(sol.get("pan_y", 0.0)),
+                "target_x": float(sol.get("target_x", 0.0)),
+                "target_y": float(sol.get("target_y", 0.0)),
+                "target_z": float(sol.get("target_z", 0.0)),
             })
         except Exception:
             pass

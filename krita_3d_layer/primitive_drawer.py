@@ -74,8 +74,12 @@ def save_primitive_history(items):
 
 def add_primitive_to_history(entry):
     items = load_primitive_history()
-    # Check if duplicate of most recent entry
-    if items and items[0].get("corners") == entry.get("corners") and items[0].get("primitive_type") == entry.get("primitive_type"):
+    # Check if duplicate of most recent entry using timestamp/id instead of None corners
+    entry_id = entry.get('id') or entry.get('timestamp')
+    last_id = (items[0].get('id') or items[0].get('timestamp')) if items else None
+    if items and entry_id and last_id and entry_id == last_id and items[0].get('primitive_type') == entry.get('primitive_type'):
+        items[0] = entry
+    elif items and entry.get('corners') is not None and items[0].get('corners') == entry.get('corners') and items[0].get('primitive_type') == entry.get('primitive_type'):
         items[0] = entry
     else:
         items.insert(0, entry)

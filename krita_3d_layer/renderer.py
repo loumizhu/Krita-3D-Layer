@@ -45,7 +45,7 @@ def project_cam_coords(camera, xc, yc, zc, render_size, offset_x=0.0, offset_y=0
         ortho_size = max(0.01, camera.distance * 0.5)
         ndc_x = xc / (ortho_size * aspect)
         ndc_y = yc / ortho_size
-        ndc_z = -zc / max(1.0, camera.far_clip)
+        ndc_z = zc / max(1.0, camera.far_clip)
         sx = (ndc_x + 1.0) * half_size + offset_x
         sy = (1.0 - ndc_y) * half_size + offset_y
         return QPointF(sx, sy), ndc_z
@@ -583,12 +583,14 @@ class Renderer3D:
 
         screen_pts = []
         ndc_pts    = []
-        for v in r_verts:
+        clipped_indices = set()
+        for idx, v in enumerate(r_verts):
             pt, ndc_z = project_camera_point(
                 camera, model_view, v.x(), v.y(), v.z(),
                 render_size, offset_x, offset_y, aspect=1.0)
             if pt is None:
-                screen_pts.append(QPointF(-9999.0, -9999.0))
+                clipped_indices.add(idx)
+                screen_pts.append(QPointF(0.0, 0.0))
                 ndc_pts.append((0.0, 0.0, 999.0))
             else:
                 screen_pts.append(pt)
@@ -596,6 +598,7 @@ class Renderer3D:
 
         # Project original vertices for edge backface culling
         orig_screen_pts = screen_pts[:len(mesh.vertices)] if is_curvilinear else screen_pts
+        orig_clipped    = {i for i in clipped_indices if i < len(mesh.vertices)} if is_curvilinear else clipped_indices
 
         visible_faces  = []
         is_wire_only   = (style == RenderStyle.WIREFRAME)
@@ -604,6 +607,8 @@ class Renderer3D:
         is_shaded_wire = (style == RenderStyle.SHADED_WIREFRAME)
 
         for i, face in enumerate(r_faces):
+            if face[0] in clipped_indices or face[1] in clipped_indices or face[2] in clipped_indices:
+                continue
             p0 = screen_pts[face[0]]; p1 = screen_pts[face[1]]; p2 = screen_pts[face[2]]
 
             cross2d   = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
@@ -669,11 +674,12 @@ class Renderer3D:
                     for j in range(len(curr_pts) - 1):
                         painter.drawLine(curr_pts[j], curr_pts[j + 1])
             else:
+                if idx_a in orig_clipped or idx_b in orig_clipped:
+                    return
                 pA = orig_screen_pts[idx_a]
                 pB = orig_screen_pts[idx_b]
-                if pA.x() > -9000 and pB.x() > -9000:
-                    painter.setPen(pen)
-                    painter.drawLine(pA, pB)
+                painter.setPen(pen)
+                painter.drawLine(pA, pB)
 
         # Contour pass
         if self.contour_width > 0.1 and not is_wire_only:
@@ -708,10 +714,13 @@ class Renderer3D:
             drawn_edges = set()
 
             for i, face in enumerate(mesh.faces):
-                p0 = orig_screen_pts[face[0]]; p1 = orig_screen_pts[face[1]]; p2 = orig_screen_pts[face[2]]
-                cross2d = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
-                if self.wireframe_backface_culling and cross2d >= 0.0:
-                    continue
+                if self.wireframe_backface_culling:
+                    if face[0] in orig_clipped or face[1] in orig_clipped or face[2] in orig_clipped:
+                        continue
+                    p0 = orig_screen_pts[face[0]]; p1 = orig_screen_pts[face[1]]; p2 = orig_screen_pts[face[2]]
+                    cross2d = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
+                    if cross2d >= 0.0:
+                        continue
                 v0, v1, v2 = face[0], face[1], face[2]
                 for e in ((v0, v1) if v0 < v1 else (v1, v0),
                           (v1, v2) if v1 < v2 else (v2, v1),
@@ -734,10 +743,13 @@ class Renderer3D:
             drawn_edges = set()
 
             for face in mesh.faces:
-                p0 = orig_screen_pts[face[0]]; p1 = orig_screen_pts[face[1]]; p2 = orig_screen_pts[face[2]]
-                cross2d = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
-                if self.wireframe_backface_culling and cross2d >= 0.0:
-                    continue
+                if self.wireframe_backface_culling:
+                    if face[0] in orig_clipped or face[1] in orig_clipped or face[2] in orig_clipped:
+                        continue
+                    p0 = orig_screen_pts[face[0]]; p1 = orig_screen_pts[face[1]]; p2 = orig_screen_pts[face[2]]
+                    cross2d = (p1.x()-p0.x())*(p2.y()-p0.y()) - (p1.y()-p0.y())*(p2.x()-p0.x())
+                    if cross2d >= 0.0:
+                        continue
                 v0, v1, v2 = face[0], face[1], face[2]
                 for e in ((v0, v1) if v0 < v1 else (v1, v0),
                           (v1, v2) if v1 < v2 else (v2, v1),

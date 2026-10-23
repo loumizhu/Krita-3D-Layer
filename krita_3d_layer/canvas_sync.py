@@ -2,7 +2,7 @@
 Renders and stamps the 3D viewport onto Krita paint layers.
 """
 
-from .qt_compat import Qt, QColor, QImage, QPainter, QPointF
+from .qt_compat import Qt, QColor, QImage, QPainter, QPointF, QWidget
 
 try:
     from krita import Krita
@@ -58,10 +58,17 @@ class CanvasSyncManager:
             h = doc.height()
             if w <= 0 or h <= 0:
                 return None
-            data = doc.pixelData(0, 0, w, h)
-            if data:
-                qimg = QImage(data, w, h, QImage.Format_ARGB32)
-                return qimg.copy()
+            if hasattr(doc, 'projection'):
+                proj = doc.projection(0, 0, w, h)
+                if proj and not proj.isNull():
+                    return proj.copy()
+            color_model = doc.colorModel() if hasattr(doc, 'colorModel') else "RGBA"
+            color_depth = doc.colorDepth() if hasattr(doc, 'colorDepth') else "U8"
+            if color_model == "RGBA" and color_depth == "U8":
+                data = doc.pixelData(0, 0, w, h)
+                if data:
+                    qimg = QImage(data, w, h, QImage.Format_ARGB32)
+                    return qimg.copy()
         except Exception:
             pass
         return None
@@ -96,7 +103,6 @@ class CanvasSyncManager:
             qwin = win.qwindow() if win else None
             canvas_w = None
             if qwin:
-                from PyQt5.QtWidgets import QWidget
                 for w in qwin.findChildren(QWidget):
                     if w.metaObject().className() == "KisOpenGLCanvas2" and w.isVisible():
                         canvas_w = w
@@ -127,13 +133,21 @@ class CanvasSyncManager:
 
                     clamped_rx = max(0, min(doc_w - 1, int(rx)))
                     clamped_ry = max(0, min(doc_h - 1, int(ry)))
-                    clamped_rw = max(1, min(doc_w - clamped_rx, int(rw)))
-                    clamped_rh = max(1, min(doc_h - clamped_ry, int(rh)))
+                    clamped_rw = max(1, min(doc_w, int(rx + rw)) - clamped_rx)
+                    clamped_rh = max(1, min(doc_h, int(ry + rh)) - clamped_ry)
 
-                    data = doc.pixelData(clamped_rx, clamped_ry, clamped_rw, clamped_rh)
                     qimg = None
-                    if data:
-                        qimg = QImage(data, clamped_rw, clamped_rh, QImage.Format_ARGB32).copy()
+                    if hasattr(doc, 'projection'):
+                        proj = doc.projection(clamped_rx, clamped_ry, clamped_rw, clamped_rh)
+                        if proj and not proj.isNull():
+                            qimg = proj.copy()
+                    if qimg is None:
+                        color_model = doc.colorModel() if hasattr(doc, 'colorModel') else "RGBA"
+                        color_depth = doc.colorDepth() if hasattr(doc, 'colorDepth') else "U8"
+                        if color_model == "RGBA" and color_depth == "U8":
+                            data = doc.pixelData(clamped_rx, clamped_ry, clamped_rw, clamped_rh)
+                            if data:
+                                qimg = QImage(data, clamped_rw, clamped_rh, QImage.Format_ARGB32).copy()
 
                     return {
                         "rect": (clamped_rx, clamped_ry, clamped_rw, clamped_rh),
@@ -266,6 +280,31 @@ class CanvasSyncManager:
             pixel_data = bytes(ptr)
             out_x, out_y, out_w, out_h = 0, 0, render_w, render_h
 
+        # Check document color model & bit depth support BEFORE creating target layer
+        color_model = doc.colorModel() if hasattr(doc, 'colorModel') else "RGBA"
+        color_depth = doc.colorDepth() if hasattr(doc, 'colorDepth') else "U8"
+
+        has_numpy = False
+        try:
+            import numpy as np
+            has_numpy = True
+        except ImportError:
+            pass
+
+        is_supported = False
+        if color_model == "RGBA" and color_depth in ("U8", "U16"):
+            is_supported = True
+        elif color_model == "RGBA" and color_depth in ("F16", "F32") and has_numpy:
+            is_supported = True
+        elif color_model == "GRAYA" and color_depth == "U8":
+            is_supported = True
+
+        if not is_supported:
+            raise RuntimeError(
+                f"Document color space '{color_model} {color_depth}' is not supported for 3D stamping. "
+                f"Please use an RGB canvas (Image -> Convert Image Color Space...)."
+            )
+
         # Locate or create target layer
         target_node = None
         if layer_mode == "active":
@@ -307,23 +346,29 @@ class CanvasSyncManager:
             if target_node.opacity() == 0:
                 target_node.setOpacity(255)
 
-        # Check and handle document color model & bit depth
-        color_model = doc.colorModel() if hasattr(doc, 'colorModel') else "RGBA"
-        color_depth = doc.colorDepth() if hasattr(doc, 'colorDepth') else "U8"
-
-        if color_model == "RGBA" and color_depth == "U16":
+        # Convert pixel data to match document color model & bit depth
+        if color_model == "RGBA" and color_depth == "U8":
+            pass
+        elif color_model == "RGBA" and color_depth == "U16":
             # Fast vectorized conversion via NumPy if available, or precomputed 256-entry LUT
-            try:
-                import numpy as np
+            if has_numpy:
                 arr8 = np.frombuffer(pixel_data, dtype=np.uint8)
                 pixel_data = (arr8.astype(np.uint16) * 257).tobytes()
-            except ImportError:
+            else:
                 u16_lut = [bytes([(b * 257) & 0xFF, ((b * 257) >> 8) & 0xFF]) for b in range(256)]
                 pixel_data = b"".join(u16_lut[b] for b in pixel_data)
+        elif color_model == "RGBA" and color_depth in ("F16", "F32"):
+            # F16/F32 in Krita are RGBA order, linear
+            arr = np.frombuffer(pixel_data, dtype=np.uint8).reshape(-1, 4)
+            c = arr[:, :3].astype(np.float32) / 255.0
+            c_lin = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+            alpha = (arr[:, 3].astype(np.float32) / 255.0)[:, np.newaxis]
+            rgba_linear = np.concatenate([c_lin[:, 2:3], c_lin[:, 1:2], c_lin[:, 0:1], alpha], axis=1)
+            target_dtype = np.float16 if color_depth == "F16" else np.float32
+            pixel_data = rgba_linear.astype(target_dtype).tobytes()
         elif color_model == "GRAYA" and color_depth == "U8":
             # Fast Grayscale conversion via NumPy or structured conversion
-            try:
-                import numpy as np
+            if has_numpy:
                 arr = np.frombuffer(pixel_data, dtype=np.uint8).reshape(-1, 4)
                 # BGRA channels: 0=B, 1=G, 2=R, 3=A
                 gray = (arr[:, 2].astype(np.float32) * 0.299 +
@@ -334,7 +379,7 @@ class CanvasSyncManager:
                 graya[:, 0] = gray
                 graya[:, 1] = alpha
                 pixel_data = graya.tobytes()
-            except ImportError:
+            else:
                 num_px = out_w * out_h
                 gray_bytes = bytearray(num_px * 2)
                 for i in range(num_px):
@@ -345,10 +390,9 @@ class CanvasSyncManager:
                     gray_bytes[i * 2] = int(0.299 * r + 0.587 * g + 0.114 * b)
                     gray_bytes[i * 2 + 1] = a
                 pixel_data = bytes(gray_bytes)
-        elif color_model not in ("RGBA", "GRAYA"):
+        else:
             raise RuntimeError(
-                f"Document color model '{color_model}' is not supported for 3D stamping. "
-                f"Please use an RGB canvas (Image -> Convert Image Color Space...)."
+                f"Document color space '{color_model} {color_depth}' is not supported for 3D stamping."
             )
 
         # Write pixel data to layer

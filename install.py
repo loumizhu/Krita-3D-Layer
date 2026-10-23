@@ -191,8 +191,13 @@ app.addDockWidgetFactory(
 
 # Show docker directly in the active main window
 try:
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtWidgets import QDockWidget, QAction, QMenu, QMenuBar
+    try:
+        from PyQt5.QtCore import Qt
+        from PyQt5.QtWidgets import QDockWidget, QAction, QMenu, QMenuBar
+    except (ImportError, ModuleNotFoundError):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtWidgets import QDockWidget, QMenu, QMenuBar
     qwin = app.activeWindow().qwindow() if app.activeWindow() else None
     if qwin:
         existing_dock = None

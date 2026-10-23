@@ -85,6 +85,19 @@ class MeshData:
         self.bbox_max = QVector3D(max_x, max_y, max_z)
         self.center = QVector3D((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, (min_z + max_z) * 0.5)
 
+    def compute_bounds(self):
+        if not self.vertices:
+            return
+        min_x = min(v.x() for v in self.vertices)
+        max_x = max(v.x() for v in self.vertices)
+        min_y = min(v.y() for v in self.vertices)
+        max_y = max(v.y() for v in self.vertices)
+        min_z = min(v.z() for v in self.vertices)
+        max_z = max(v.z() for v in self.vertices)
+        self.bbox_min = QVector3D(min_x, min_y, min_z)
+        self.bbox_max = QVector3D(max_x, max_y, max_z)
+        self.center = QVector3D((min_x + max_x) * 0.5, (min_y + max_y) * 0.5, (min_z + max_z) * 0.5)
+
     def compute_face_normals(self):
         self.face_normals = []
         for f in self.faces:

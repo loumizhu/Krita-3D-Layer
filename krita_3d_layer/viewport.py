@@ -858,7 +858,7 @@ class Viewport3D(QWidget):
     def _draw_gizmo_with_hit_rects(self, painter, ox, oy, size):
         """Draw coordinate gizmo AND store per-axis click rects (compact)."""
         import math as _math
-        from PyQt5.QtGui import QVector4D, QFont as _QFont
+        from .qt_compat import QVector4D, QFont as _QFont
 
         _, view_mat, _ = self.camera.get_matrices(100, 100)
 

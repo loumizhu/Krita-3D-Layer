@@ -34,6 +34,42 @@ for cls in (QtWidgets.QDialog, QtWidgets.QMenu, QtWidgets.QApplication):
     if hasattr(cls, 'exec') and not hasattr(cls, 'exec_'):
         cls.exec_ = cls.exec
 
+# PyQt6 nested scoped enums & method compatibility
+if QT_VERSION == 6:
+    _scoped_enum_classes = (
+        QtWidgets.QSizePolicy,
+        QtCore.QEvent,
+        QtGui.QPainter,
+        QtGui.QImage,
+        QtWidgets.QFrame,
+        QtWidgets.QDialog,
+        QtWidgets.QAbstractSpinBox,
+        QtWidgets.QFileDialog,
+        QtWidgets.QMessageBox,
+        QtGui.QFont,
+    )
+    for _target_cls in _scoped_enum_classes:
+        for _attr_name in dir(_target_cls):
+            try:
+                _sub = getattr(_target_cls, _attr_name)
+                if isinstance(_sub, type):
+                    for _member_name in dir(_sub):
+                        if _member_name.startswith('_'):
+                            continue
+                        try:
+                            if not hasattr(_target_cls, _member_name):
+                                setattr(_target_cls, _member_name, getattr(_sub, _member_name))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    if hasattr(QtGui, 'QMouseEvent') and not hasattr(QtGui.QMouseEvent, 'globalPos'):
+        try:
+            QtGui.QMouseEvent.globalPos = lambda self: self.globalPosition().toPoint()
+        except Exception:
+            pass
+
 
 class _QtEnumProxy:
     """
@@ -97,6 +133,7 @@ QPolygonF = QtGui.QPolygonF
 QIcon = QtGui.QIcon
 QCursor = QtGui.QCursor
 QDesktopServices = QtGui.QDesktopServices
+QMouseEvent = QtGui.QMouseEvent
 
 # QtWidgets re-exports
 QWidget = QtWidgets.QWidget

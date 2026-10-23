@@ -7,7 +7,7 @@ import os
 import math
 import json
 from .qt_compat import (
-    Qt, QTimer, QUrl,
+    Qt, QTimer, QUrl, QMatrix4x4,
     QColor, QFont, QDesktopServices, QIcon,
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QComboBox, QCheckBox, QSlider, QFileDialog,
@@ -449,6 +449,28 @@ DOCKER_STYLE = """
 """
 
 
+def _bake_primitive_transform(mesh, matrix, flip=False):
+    """Bake flip_yaw and transform_matrix into primitive mesh vertices."""
+    if not mesh or not getattr(mesh, 'vertices', None):
+        return
+    mesh.transform_matrix = matrix
+    mesh.flip_yaw = bool(flip)
+    if matrix is None and not flip:
+        return
+    verts = list(mesh.vertices)
+    if flip:
+        from .qt_compat import QVector3D
+        verts = [QVector3D(-v.x(), v.y(), -v.z()) for v in verts]
+    if matrix is not None:
+        verts = [matrix.map(v) for v in verts]
+    mesh.vertices = verts
+    mesh.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
+    if hasattr(mesh, 'compute_bounds'):
+        mesh.compute_bounds()
+    if hasattr(mesh, 'compute_face_normals'):
+        mesh.compute_face_normals()
+
+
 class Krita3DLayerDocker(DockWidget):
     """
     3D Layer Docker for Krita.
@@ -527,6 +549,8 @@ class Krita3DLayerDocker(DockWidget):
 
         self.mesh = None
         self.mesh_path = None
+        self._session_restored = False
+        self._grid_only = False
         self.frame_rect = None
         self.custom_bg_color = QColor(255, 255, 255)
         self.is_sticky_viewport = True
@@ -1902,28 +1926,37 @@ class Krita3DLayerDocker(DockWidget):
 
     def _apply_drawn_primitive_entry(self, entry):
         ptype = entry.get("primitive_type", "Box")
-        w = float(entry.get("box_w", 2.0))
-        h = float(entry.get("box_h", 2.0))
-        d = float(entry.get("box_d", 2.0))
-        if ptype == "Box":
+        sol_data = entry.get("solution", {}) if isinstance(entry.get("solution"), dict) else {}
+        w = float(sol_data.get("box_w", entry.get("box_w", entry.get("rect_width", 2.0))))
+        h = float(sol_data.get("box_h", entry.get("box_h", entry.get("rect_height", 2.0))))
+        d = float(sol_data.get("box_d", entry.get("box_d", entry.get("rect_depth", 2.0))))
+        if ptype in ("Ground Rectangle", "Loaded 3D Model", "Ground", "Model", None, ""):
+            mesh = None
+        elif ptype == "Box":
             mesh = create_box_primitive(w, h, d)
         elif ptype == "Cylinder":
-            mesh = create_cylinder_primitive(w * 0.5, h, 24)
+            mesh = create_cylinder_primitive(min(w, d) * 0.5, h, 24)
         elif ptype == "Sphere":
-            mesh = create_sphere_primitive(w * 0.5, 16, 24)
+            mesh = create_sphere_primitive(min(w, d) * 0.5, 16, 24)
         elif ptype == "Pyramid":
             mesh = create_pyramid_primitive(w, h, d)
         elif ptype == "Cone":
-            mesh = create_cone_primitive(w * 0.5, h, 24)
+            mesh = create_cone_primitive(min(w, d) * 0.5, h, 24)
         elif ptype == "Plane":
             mesh = create_plane_primitive(w, d, 2)
         elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
             mesh = create_room_primitive(w, h, d)
         else:
-            mesh = create_box_primitive(w, h, d)
+            mesh = None
 
         sol = dict(entry)
+        if sol_data:
+            sol.update(sol_data)
         sol["mesh"] = mesh
+        sol["primitive_type"] = ptype
+        sol["box_w"] = w
+        sol["box_h"] = h
+        sol["box_d"] = d
         self._on_primitive_drawer_applied(sol)
 
     # -----------------------------------------------------------------
@@ -2284,17 +2317,11 @@ class Krita3DLayerDocker(DockWidget):
         else:
             return
 
-        if saved_transform and getattr(new_mesh, 'vertices', None):
-            new_mesh.transform_matrix = saved_transform
-            new_mesh.flip_yaw = saved_flip
-            verts = list(new_mesh.vertices)
-            if saved_flip:
-                from .qt_compat import QVector3D
-                verts = [QVector3D(-v.x(), v.y(), -v.z()) for v in verts]
-            verts = [saved_transform.map(v) for v in verts]
-            new_mesh.vertices = verts
-            new_mesh.original_vertices = [(v.x(), v.y(), v.z()) for v in verts]
+        if saved_transform:
+            _bake_primitive_transform(new_mesh, saved_transform, saved_flip)
         self.mesh = new_mesh
+        self.mesh_path = None
+        self._grid_only = False
         self.viewport.set_mesh(new_mesh)
         self.lbl_model.setText(f"Primitive: {ptype}\n{len(new_mesh.vertices)} verts, {len(new_mesh.faces)} faces")
         self.viewport.update()
@@ -2302,6 +2329,7 @@ class Krita3DLayerDocker(DockWidget):
         self._schedule_save()
 
     def _select_no_object_only_grid(self):
+        self._grid_only = True
         self.mesh = None
         self.mesh_path = None
         self.viewport.set_mesh(None)
@@ -2333,6 +2361,7 @@ class Krita3DLayerDocker(DockWidget):
             m = load_3d_file(path)
             self.mesh = m
             self.mesh_path = path
+            self._grid_only = False
 
             fn_lower = os.path.basename(path).lower()
             if "box" in fn_lower or "cube" in fn_lower:
@@ -3155,17 +3184,18 @@ class Krita3DLayerDocker(DockWidget):
         if "mesh" in sol and sol["mesh"]:
             self.mesh = sol["mesh"]
             self.mesh_path = None
+            self._grid_only = False
             self.mesh.primitive_type = ptype
             if ptype == "Box":
                 self.mesh.primitive_params = {"w": rw, "h": rh, "d": rd}
             elif ptype == "Cylinder":
-                self.mesh.primitive_params = {"radius": rw * 0.5, "height": rh, "segments": 24}
+                self.mesh.primitive_params = {"radius": min(rw, rd) * 0.5, "height": rh, "segments": 24}
             elif ptype == "Sphere":
-                self.mesh.primitive_params = {"radius": sr, "rings": 16, "sectors": 24}
+                self.mesh.primitive_params = {"radius": min(rw, rd) * 0.5, "rings": 16, "sectors": 24}
             elif ptype == "Pyramid":
                 self.mesh.primitive_params = {"w": rw, "h": rh, "d": rd}
             elif ptype == "Cone":
-                self.mesh.primitive_params = {"radius": rw * 0.5, "height": rh, "segments": 24}
+                self.mesh.primitive_params = {"radius": min(rw, rd) * 0.5, "height": rh, "segments": 24}
             elif ptype == "Plane":
                 self.mesh.primitive_params = {"w": rw, "d": rd, "subdivisions": 2}
             self.viewport.set_mesh(self.mesh)
@@ -3175,9 +3205,19 @@ class Krita3DLayerDocker(DockWidget):
             sx = float(sol.get("scale_x", 1.0))
             sy = float(sol.get("scale_y", 1.0))
             sz = float(sol.get("scale_z", 1.0))
+            elev = float(sol.get("elevation", 0.0))
+            t = getattr(self.viewport, 'object_transform', None)
+            if t:
+                t.scale_x = sx
+                t.scale_y = sy
+                t.scale_z = sz
+                t.pos_y = elev
             if hasattr(self, 'spin_obj_sx'): self.spin_obj_sx.setValue(sx)
-            if hasattr(self, 'spin_obj_sz'): self.spin_obj_sz.setValue(sz)
             if hasattr(self, 'spin_obj_sy'): self.spin_obj_sy.setValue(sy)
+            if hasattr(self, 'spin_obj_sz'): self.spin_obj_sz.setValue(sz)
+            if hasattr(self, 'spin_obj_py'): self.spin_obj_py.setValue(elev)
+            if hasattr(self, '_on_obj_pos_spin'):
+                self._on_obj_pos_spin()
 
         # 3. Reset projection mode to standard linear perspective to match calibration
         c = self.viewport.camera
@@ -3204,7 +3244,7 @@ class Krita3DLayerDocker(DockWidget):
             c.target_z = float(sol["target_z"])
         c.ground_y = float(sol.get("target_y", 0.0))
         if ptype == "Sphere":
-            c.target_y = float(sol.get("target_y", 0.0)) + sr
+            c.target_y = float(sol.get("target_y", 0.0))
 
         self._sync_ui()
         self._sync_target_spins()
@@ -3277,6 +3317,7 @@ class Krita3DLayerDocker(DockWidget):
                 self._reset_obj_all()
                 self.mesh = sol["mesh"]
                 self.mesh_path = None
+                self._grid_only = False
                 ptype = sol.get("primitive_type", primitive_type)
                 self.mesh.primitive_type = ptype
                 if "M_obj" in sol and sol["M_obj"]:
@@ -3398,24 +3439,29 @@ class Krita3DLayerDocker(DockWidget):
             self._reset_obj_all()
             self.mesh = sol["mesh"]
             self.mesh_path = None
+            self._grid_only = False
             ptype = sol.get("primitive_type", "Box")
             self.mesh.primitive_type = ptype
             if "M_obj" in sol and sol["M_obj"]:
                 self.mesh.transform_matrix = sol["M_obj"]
             if "flip_yaw" in sol:
                 self.mesh.flip_yaw = sol["flip_yaw"]
+            bw = float(sol.get("box_w", 2.0))
+            bd = float(sol.get("box_d", 2.0))
+            bh = float(sol.get("box_h", 2.0))
+            br = min(bw, bd) * 0.5
             if ptype == "Box":
-                self.mesh.primitive_params = {"w": sol.get("box_w", 2.0), "h": sol.get("box_h", 2.0), "d": sol.get("box_d", 2.0)}
+                self.mesh.primitive_params = {"w": bw, "h": bh, "d": bd}
             elif ptype == "Cylinder":
-                self.mesh.primitive_params = {"radius": sol.get("box_w", 2.0) * 0.5, "height": sol.get("box_h", 2.0), "segments": 24}
+                self.mesh.primitive_params = {"radius": br, "height": bh, "segments": 24}
             elif ptype == "Sphere":
-                self.mesh.primitive_params = {"radius": sol.get("box_w", 2.0) * 0.5, "rings": 16, "sectors": 24}
+                self.mesh.primitive_params = {"radius": br, "rings": 16, "sectors": 24}
             elif ptype == "Pyramid":
-                self.mesh.primitive_params = {"w": sol.get("box_w", 2.0), "h": sol.get("box_h", 2.0), "d": sol.get("box_d", 2.0)}
+                self.mesh.primitive_params = {"w": bw, "h": bh, "d": bd}
             elif ptype == "Cone":
-                self.mesh.primitive_params = {"radius": sol.get("box_w", 2.0) * 0.5, "height": sol.get("box_h", 2.0), "segments": 24}
+                self.mesh.primitive_params = {"radius": br, "height": bh, "segments": 24}
             elif ptype == "Plane":
-                self.mesh.primitive_params = {"w": sol.get("box_w", 2.0), "d": sol.get("box_d", 2.0), "subdivisions": 2}
+                self.mesh.primitive_params = {"w": bw, "d": bd, "subdivisions": 2}
             self.viewport.set_mesh(self.mesh)
             self._sync_primitive_ui()
             self.lbl_model.setText(f"Drawn Primitive: {ptype} ({self.mesh.vertex_count} vertices, {self.mesh.face_count} faces)")
@@ -3977,7 +4023,9 @@ class Krita3DLayerDocker(DockWidget):
     def showEvent(self, event):
         super().showEvent(event)
         try:
-            self._restore_session()
+            if not getattr(self, '_session_restored', False):
+                self._session_restored = True
+                self._restore_session()
             self._match_ratio()
             if hasattr(self, "is_sticky_viewport"):
                 self._apply_sticky_viewport(self.is_sticky_viewport)
@@ -4145,6 +4193,9 @@ class Krita3DLayerDocker(DockWidget):
             "obj_scale_z":          float(self.viewport.object_transform.scale_z) if hasattr(self.viewport, 'object_transform') else 1.0,
             "primitive_type":       getattr(self.mesh, "primitive_type", "") if self.mesh else "",
             "primitive_params":     getattr(self.mesh, "primitive_params", {}) if self.mesh else {},
+            "transform_matrix":     list(self.mesh.transform_matrix.copyDataTo()) if (self.mesh and getattr(self.mesh, "transform_matrix", None) is not None and hasattr(self.mesh.transform_matrix, "copyDataTo")) else None,
+            "flip_yaw":             bool(getattr(self.mesh, "flip_yaw", False)) if self.mesh else False,
+            "grid_only":            bool(getattr(self, "_grid_only", False)),
         }
         return data
 
@@ -4171,63 +4222,92 @@ class Krita3DLayerDocker(DockWidget):
             lit = self.viewport.lighting
 
             # 1. Model loading first (with frame=False so it doesn't overwrite camera)
-            mpath = data.get("mesh_path", "")
             loaded = False
-            if mpath and os.path.exists(mpath):
-                self._load_file(mpath, frame=False)
+            is_primitive = False
+            grid_only = bool(data.get("grid_only", False))
+            if grid_only:
+                self._grid_only = True
+                self.mesh = None
+                self.mesh_path = None
+                self.viewport.set_mesh(None)
+                self.lbl_model.setText("No object (Grid only)")
                 loaded = True
-            elif mpath:
-                cand = os.path.join(os.path.dirname(__file__), mpath)
-                if os.path.exists(cand):
-                    self._load_file(cand, frame=False)
+            else:
+                self._grid_only = False
+                mpath = data.get("mesh_path", "")
+                if mpath and os.path.exists(mpath):
+                    self._load_file(mpath, frame=False)
                     loaded = True
-                else:
-                    cand2 = os.path.join(os.path.dirname(__file__), "3D-Primitive", os.path.basename(mpath))
-                    if os.path.exists(cand2):
-                        self._load_file(cand2, frame=False)
+                elif mpath:
+                    cand = os.path.join(os.path.dirname(__file__), mpath)
+                    if os.path.exists(cand):
+                        self._load_file(cand, frame=False)
                         loaded = True
-                if not loaded and ("asaro" in mpath.lower() or "head" in mpath.lower()):
-                    for alt_name in ("Asaro_Head_Studio.obj", "Asaro_Minimal.glb"):
-                        alt_cand = os.path.join(os.path.dirname(__file__), "3D-Primitive", alt_name)
-                        if os.path.exists(alt_cand):
-                            self._load_file(alt_cand, frame=False)
+                    else:
+                        cand2 = os.path.join(os.path.dirname(__file__), "3D-Primitive", os.path.basename(mpath))
+                        if os.path.exists(cand2):
+                            self._load_file(cand2, frame=False)
                             loaded = True
-                            break
-            if not loaded and data.get("primitive_type"):
-                ptype = data.get("primitive_type")
-                pparams = data.get("primitive_params", {})
-                if ptype == "Box":
-                    self.mesh = create_box_primitive(pparams.get("w", 2.0), pparams.get("h", 2.0), pparams.get("d", 2.0))
-                elif ptype == "Cylinder":
-                    self.mesh = create_cylinder_primitive(pparams.get("radius", 1.0), pparams.get("height", 2.0), pparams.get("segments", 24))
-                elif ptype == "Sphere":
-                    self.mesh = create_sphere_primitive(pparams.get("radius", 1.0), pparams.get("rings", 16), pparams.get("sectors", 24))
-                elif ptype == "Pyramid":
-                    self.mesh = create_pyramid_primitive(pparams.get("w", 2.0), pparams.get("h", 2.0), pparams.get("d", 2.0))
-                elif ptype == "Cone":
-                    self.mesh = create_cone_primitive(pparams.get("radius", 1.0), pparams.get("height", 2.0), pparams.get("segments", 24))
-                elif ptype == "Plane":
-                    self.mesh = create_plane_primitive(pparams.get("w", 2.0), pparams.get("d", 2.0), pparams.get("subdivisions", 2))
-                elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
-                    self.mesh = create_room_primitive(
-                        pparams.get("w", 4.0), pparams.get("h", 2.8), pparams.get("d", 4.0),
-                        subdiv_w=pparams.get("subdiv_w", 4), subdiv_h=pparams.get("subdiv_h", 4), subdiv_d=pparams.get("subdiv_d", 4),
-                        side_wall=pparams.get("side_wall", "left"),
-                        show_floor=pparams.get("show_floor", True),
-                        show_back_wall=pparams.get("show_back_wall", True),
-                        show_side_wall=pparams.get("show_side_wall", True),
-                    )
-                if self.mesh:
-                    self.viewport.set_mesh(self.mesh)
-                    self.lbl_model.setText(f"Primitive: {ptype}\n{len(self.mesh.vertices)} verts, {len(self.mesh.faces)} faces")
-                    loaded = True
+                    if not loaded and ("asaro" in mpath.lower() or "head" in mpath.lower()):
+                        for alt_name in ("Asaro_Head_Studio.obj", "Asaro_Minimal.glb"):
+                            alt_cand = os.path.join(os.path.dirname(__file__), "3D-Primitive", alt_name)
+                            if os.path.exists(alt_cand):
+                                self._load_file(alt_cand, frame=False)
+                                loaded = True
+                                break
+                if not loaded and data.get("primitive_type"):
+                    ptype = data.get("primitive_type")
+                    pparams = data.get("primitive_params", {})
+                    if ptype == "Box":
+                        self.mesh = create_box_primitive(pparams.get("w", 2.0), pparams.get("h", 2.0), pparams.get("d", 2.0))
+                    elif ptype == "Cylinder":
+                        self.mesh = create_cylinder_primitive(pparams.get("radius", 1.0), pparams.get("height", 2.0), pparams.get("segments", 24))
+                    elif ptype == "Sphere":
+                        self.mesh = create_sphere_primitive(pparams.get("radius", 1.0), pparams.get("rings", 16), pparams.get("sectors", 24))
+                    elif ptype == "Pyramid":
+                        self.mesh = create_pyramid_primitive(pparams.get("w", 2.0), pparams.get("h", 2.0), pparams.get("d", 2.0))
+                    elif ptype == "Cone":
+                        self.mesh = create_cone_primitive(pparams.get("radius", 1.0), pparams.get("height", 2.0), pparams.get("segments", 24))
+                    elif ptype == "Plane":
+                        self.mesh = create_plane_primitive(pparams.get("w", 2.0), pparams.get("d", 2.0), pparams.get("subdivisions", 2))
+                    elif ptype in ("Room", "Room (3 Planes)", "Room Corner"):
+                        self.mesh = create_room_primitive(
+                            pparams.get("w", 4.0), pparams.get("h", 2.8), pparams.get("d", 4.0),
+                            subdiv_w=pparams.get("subdiv_w", 4), subdiv_h=pparams.get("subdiv_h", 4), subdiv_d=pparams.get("subdiv_d", 4),
+                            side_wall=pparams.get("side_wall", "left"),
+                            show_floor=pparams.get("show_floor", True),
+                            show_back_wall=pparams.get("show_back_wall", True),
+                            show_side_wall=pparams.get("show_side_wall", True),
+                        )
+                    if self.mesh:
+                        self.mesh_path = None
+                        self._grid_only = False
+                        is_primitive = True
+                        loaded = True
 
-            if not loaded and self.mesh is None and not data.get("primitive_type"):
-                for default_asaro_name in ("Asaro_Head_Studio.obj", "Asaro_Minimal.glb", "Asaro Head Planes.obj"):
-                    default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", default_asaro_name)
-                    if os.path.exists(default_asaro):
-                        self._load_file(default_asaro, frame=False)
-                        break
+                if not loaded and self.mesh is None and not data.get("primitive_type"):
+                    for default_asaro_name in ("Asaro_Head_Studio.obj", "Asaro_Minimal.glb", "Asaro Head Planes.obj"):
+                        default_asaro = os.path.join(os.path.dirname(__file__), "3D-Primitive", default_asaro_name)
+                        if os.path.exists(default_asaro):
+                            self._load_file(default_asaro, frame=False)
+                            break
+
+            # Restore Matrix & Flip on rebuilt primitive mesh
+            if is_primitive and self.mesh:
+                t_mat = data.get("transform_matrix")
+                mat = None
+                if t_mat and len(t_mat) == 16:
+                    try:
+                        mat = QMatrix4x4(*[float(v) for v in t_mat])
+                    except Exception:
+                        mat = None
+                flip = bool(data.get("flip_yaw", False))
+                if mat is not None or flip:
+                    _bake_primitive_transform(self.mesh, mat, flip)
+                self.viewport.set_mesh(self.mesh)
+                ptype = data.get("primitive_type", "")
+                self.lbl_model.setText(f"Primitive: {ptype}\n{len(self.mesh.vertices)} verts, {len(self.mesh.faces)} faces")
+                self._sync_primitive_ui()
 
             # Restore Object Transform
             t = getattr(self.viewport, 'object_transform', None)
